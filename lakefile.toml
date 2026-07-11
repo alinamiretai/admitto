@@ -21,3 +21,7 @@ root = "Main"
 
 [[lean_lib]]
 name = "Admitto"
+
+[[lean_exe]]
+name = "admitto-agent"
+root = "MainAgent"
