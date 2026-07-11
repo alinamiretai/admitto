@@ -117,5 +117,3 @@ theorem shield_sound_via_core (s : Admitto.PipelineState) (hs : Admitto.Safe s)
     (proposals : List Admitto.Proposal) :
     Admitto.Safe (kernelShield.run s proposals) :=
   kernelShield.sound s hs proposals
-
-#print axioms Admitto.shield_sound_via_core
