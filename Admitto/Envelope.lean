@@ -1,4 +1,5 @@
 import Trident.Proofs.Checker
+import Admitto.Core
 
 open Trident
 
@@ -69,7 +70,7 @@ theorem step_preserves_safe (s : PipelineState) (p : Proposal) (hs : Safe s) :
     exact hs
 
 /-- Run the pipeline on an arbitrary sequence of generator proposals. -/
-def run (s : PipelineState) (proposals : List Proposal) : PipelineState :=
+def run (s : PipelineState) (proposals : List Admitto.Proposal) : PipelineState :=
   proposals.foldl step s
 
 /-- **The main theorem: the verified shield.**
@@ -77,7 +78,7 @@ def run (s : PipelineState) (proposals : List Proposal) : PipelineState :=
     from a Safe state, the pipeline stays Safe. The generator is universally
     quantified (`∀ proposals`) — the guarantee is independent of its behavior
     or capability. -/
-theorem shield_sound (s : PipelineState) (hs : Safe s) (proposals : List Proposal) :
+theorem shield_sound (s : PipelineState) (hs : Safe s) (proposals : List Admitto.Proposal) :
     Safe (run s proposals) := by
   unfold run
   induction proposals generalizing s with
@@ -89,3 +90,32 @@ end Admitto
 
 -- Verify the trusted base of the whole shield.
 #print axioms Admitto.shield_sound
+
+/-! ## The kernel shield as an instance of the generic construction -/
+
+open Admitto.Core
+
+/-- The kernel shield, packaged as a `Core.Shield`. The gate ignores the pipeline
+    state (a kernel's correctness is state-independent), so we lift `admit` to the
+    generic `σ → α → Bool` shape by discarding the state argument. -/
+def kernelShield : Shield Admitto.PipelineState Admitto.Proposal where
+  admit := fun _ p => Admitto.admit p
+  Safe  := Admitto.Safe
+  step  := Admitto.step
+  step_reject := by
+    intro s p h
+    show Admitto.step s p = s
+    unfold Admitto.step
+    have h' : Admitto.admit p = false := h
+    rw [h']
+    rfl
+  step_admit := by
+    intro s p hs _
+    exact Admitto.step_preserves_safe s p hs
+
+theorem shield_sound_via_core (s : Admitto.PipelineState) (hs : Admitto.Safe s)
+    (proposals : List Admitto.Proposal) :
+    Admitto.Safe (kernelShield.run s proposals) :=
+  kernelShield.sound s hs proposals
+
+#print axioms Admitto.shield_sound_via_core
