@@ -160,5 +160,3 @@ def typedShield : Shield Auth Op where
 theorem typed_sound_via_core (a : Auth) (hs : SafeAuth a) (ops : List Op) :
     SafeAuth (typedShield.run a ops) :=
   typedShield.sound a hs ops
-
-#print axioms Admitto.Agents.Typed.typed_sound_via_core

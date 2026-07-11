@@ -1,3 +1,4 @@
+import Admitto.Core
 /-!
 # Admitto.Agents.Sandbox — capability shield over a real action model
 
@@ -121,3 +122,23 @@ def demoState : Sandbox := { granted := ["/tmp"], initial := ["/tmp"] }
 
 -- Full sequence with a mid-stream escalation attempt. Granted stays ["/tmp"].
 #eval (runOps demoState [Op.read "/tmp", Op.grant "/etc/secrets", Op.write "/tmp"]).granted
+
+/-! ## The sandbox shield as an instance of the generic construction -/
+
+open Admitto.Core
+
+def sandboxShield : Shield Sandbox Op where
+  admit := admitOp
+  Safe  := SafeSandbox
+  step  := stepOp
+  step_reject := by
+    intro s a h
+    unfold stepOp
+    simp [h]
+  step_admit := by
+    intro s a hs _
+    exact stepOp_preserves_safe s a hs
+
+theorem sandbox_sound_via_core (s : Sandbox) (hs : SafeSandbox s) (ops : List Op) :
+    SafeSandbox (sandboxShield.run s ops) :=
+  sandboxShield.sound s hs ops
