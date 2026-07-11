@@ -106,3 +106,18 @@ theorem sandbox_sound (s : Sandbox) (hs : SafeSandbox s) (ops : List Op) :
 end Admitto.Agents.Sandbox
 
 #print axioms Admitto.Agents.Sandbox.sandbox_sound
+
+/-! ## Demo: the gate admits safe ops and rejects escalation -/
+
+open Admitto.Agents.Sandbox
+
+def demoState : Sandbox := { granted := ["/tmp"], initial := ["/tmp"] }
+
+-- Safe: reading a path it holds → ADMITTED (true)
+#eval admitOp demoState (Op.read "/tmp")
+
+-- Escalation: granting itself a path it does NOT hold → REJECTED (false)
+#eval admitOp demoState (Op.grant "/etc/secrets")
+
+-- Full sequence with a mid-stream escalation attempt. Granted stays ["/tmp"].
+#eval (runOps demoState [Op.read "/tmp", Op.grant "/etc/secrets", Op.write "/tmp"]).granted
