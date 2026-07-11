@@ -18,3 +18,6 @@ name = "Trident"
 [[lean_exe]]
 name = "trident"
 root = "Main"
+
+[[lean_lib]]
+name = "Admitto"
