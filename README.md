@@ -1,95 +1,81 @@
 # Admitto
 
-A construction for **verified safety shields** for AI systems.
+A **general, machine-checked construction** for verified safety shields for AI
+systems.
 
-Admitto wraps an untrusted AI component — a code generator, an agent — in a
-**sound, machine-checked gate** composed with a **mechanized safety induction**.
-The gate admits only actions proven to satisfy a specification; the induction
-proves that across *any* sequence of actions the AI proposes, the system stays
-safe. The AI is universally quantified out of every theorem: the guarantee does
-not depend on its behavior or capability.
+An untrusted AI component — a code generator, an agent — proposes actions. A
+**sound gate** admits only actions proven to satisfy a specification, and a
+**mechanized induction** proves that across *any* sequence of actions the AI
+proposes, the system stays safe. The AI is universally quantified out of every
+theorem: the guarantee does not depend on its behavior or capability.
 
-Every theorem below is checked by Lean's kernel with a trusted base of only
-standard axioms (`propext`, `Classical.choice`, `Quot.sound`) — no `sorry`, no
-`native_decide`.
+The construction is defined once (`Admitto/Core.lean`) and instantiated across
+three domains. Every theorem is checked by Lean's kernel with a trusted base of
+only standard axioms — no `sorry`, no `native_decide`.
 
-## The construction
+## The construction — proved once
 
-A shield is three parts:
+`Admitto.Core.Shield` packages a shield as: a state, an action, a decidable
+gate `admit`, an invariant `Safe`, a `step`, and two obligations (rejected
+actions are no-ops; admitted actions preserve `Safe`). From these,
+`Shield.sound` proves the safety induction — `Safe` is preserved across any
+sequence of actions — **once**. Each domain below instantiates `Shield`; the
+induction is reused, never re-proved.
 
-- **gate** — a decidable predicate `admit` that is *sound*: `admit action = true`
-  implies the action satisfies the spec. Sound gates do not degrade as the AI
-  gets more capable, because the guarantee is a theorem, not a classifier.
-- **invariant** `Safe` — the property preserved across the system's lifetime.
-- **induction** — a proof that starting `Safe`, gating every action with `admit`
-  keeps the system `Safe` for any sequence of proposals.
+## Three instances
 
-The induction is generic over the gate. Each domain supplies a gate; the safety
-proof is reused. Admitto demonstrates this across two domains and four gates.
+| Domain | Gate | Guarantee | Theorem |
+|---|---|---|---|
+| AI-generated GPU kernels | `checkVectorAdd` (verified equivalence) | every installed kernel provably computes its spec | `kernelShield` / `shield_sound_via_core` |
+| Agent capability-monotonicity | `admitOp` (computed effect) | granted resources never expand beyond the initial set | `sandboxShield` / `sandbox_sound_via_core` |
+| Privilege-amplification prevention | `admitTyped` (level bound) | no resource's authority is amplified beyond its initial level | `typedShield` / `typed_sound_via_core` |
 
-## Instances
+Each `*_via_core` theorem is derived from the single generic `Shield.sound`.
 
-### 1. AI-generated GPU kernels — `Admitto/Envelope.lean`
+## Demos
 
-An untrusted generator proposes Triton kernels. The gate is a machine-checked
-equivalence checker (`checkVectorAdd`, sound by `checkVectorAdd_sound`): it
-admits a kernel only if it *provably* computes vector-add for all inputs — no
-testing, no tolerance, no sampling. `shield_sound` proves every installed kernel
-meets the spec, over any sequence the generator emits.
+- **Kernels** (`./demo.sh`): the shield admits a correct vector-add kernel and
+  rejects a subtly-wrong one (`addf` → `subf`, computing a−b) — a one-character
+  error a tolerance test can miss. Rejected by proof.
+- **Agents** (`./agent_demo.sh`): an agent provisioned with `read` authority is
+  admitted for reads and *rejected* for every amplification attempt
+  (`read → write`, `read → exec`). Escalation blocked by proof.
 
-Demo (`demo.sh`): the shield admits a correct kernel and rejects a subtly-wrong
-one (`addf` → `subf`, computing a−b instead of a+b) — a one-character error a
-tolerance test can miss. The gate rejects it by proof.
+## Validation
 
-### 2. Agent capability-monotonicity — `Admitto/Agents/Sandbox.lean`
-
-An untrusted agent proposes filesystem operations. The gate *computes* each
-operation's effect on the permission state (rather than trusting the agent's
-self-report), and admits an operation only if it does not expand the granted
-set. `sandbox_sound` proves the agent's granted resources never grow beyond the
-initial provision — for any sequence of operations.
-
-Demo: the shield rejects a mid-sequence privilege-escalation attempt
-(`grant "/etc/secrets"`); granted paths remain unchanged.
-
-### 3. Privilege-amplification prevention — `Admitto/Agents/Typed.lean`
-
-Capabilities carry *levels* (read < write < exec). The threat is *amplification*:
-acquiring a higher level over a resource than provisioned. The gate admits an
-acquisition only if the requested level is within the agent's initial grant.
-`typed_sound` proves no resource's authority is ever amplified beyond its initial
-level, across any sequence of operations.
-
-Demo: an agent holding `read:/data` is refused `write:/data` and `exec:/data` —
-amplification blocked by proof.
+The typed capability model is differentially validated against real OS
+filesystem permissions (`validate_agent.py`): for each (held-level, requested-op),
+a real file is created with the corresponding permissions, the operation is
+actually attempted, and the OS's allow/deny is compared to the model's verdict.
+**Result: 9/9 agreement** on the comparable (cumulative-permission) domain. The
+model's guarantees are about an abstraction validated against real system
+behavior.
 
 ## What is proven, and what is not
 
-Admitto states exactly what it guarantees.
-
-- **Sound gate, capability-independent.** Each gate's soundness is a theorem, so
+- **Sound, capability-independent gates.** Each gate's soundness is a theorem, so
   its guarantee holds regardless of how capable the AI is — for the property it
   checks.
-- **Scope is the spec.** A gate guarantees only its specified property: kernel
-  equivalence, capability-monotonicity, no-amplification. It says nothing about
-  properties it does not specify.
-- **Closure is assumed, not proven.** The shields govern the gated channel (the
-  install path, the operation interface). That this is the *only* channel — no
-  side channels, and no human who can be persuaded to act outside the gate — is
-  an isolation property assumed here, standard for this class of system, and the
-  irreducible limit of the approach.
-- **World model.** The kernel gate rests on a defined kernel semantics; the agent
-  gates rest on an abstract permission/capability model. Differential validation
-  of these models against real execution is ongoing work.
-- **Numerics.** The kernel gate checks algebraic equivalence (structure), not
-  floating-point rounding.
+- **Scope is the spec.** A gate guarantees only its specified property. It says
+  nothing about properties it does not specify (e.g. the gates do not address
+  deception or misaligned goals — those are not formally specifiable).
+- **Closure is assumed.** The shields govern the gated channel. That this is the
+  *only* channel — no side channels, no human persuaded to act outside the gate —
+  is an isolation property assumed here, standard for this class of system, and
+  the irreducible limit of the approach.
+- **World models.** The typed capability model is validated against real OS
+  behavior (above). The kernel gate rests on a Triton kernel semantics whose
+  differential validation against real execution is future work.
 
 ## Building
 
-    lake build Admitto.Envelope          # kernel shield
-    lake build Admitto.Agents.Sandbox    # capability-monotonicity shield
-    lake build Admitto.Agents.Typed      # amplification-prevention shield
-    ./demo.sh                            # kernel demo (VERIFIED / REJECTED)
+    lake build Admitto.Core                # the generic construction
+    lake build Admitto.Envelope            # kernel shield instance
+    lake build Admitto.Agents.Sandbox      # capability-monotonicity instance
+    lake build Admitto.Agents.Typed        # amplification-prevention instance
+    ./demo.sh          # kernel demo
+    ./agent_demo.sh    # agent demo
+    python3 validate_agent.py   # OS validation
 
 ## Background
 
@@ -98,6 +84,6 @@ component wrapped by a verified one), instantiated with a **machine-checked**
 gate and a **mechanized** safety induction — the composition that distinguishes
 Admitto from prior work: runtime-assurance systems for AI use unsound (judged)
 gates or paper-only proofs; verified checkers exist but are not composed into a
-deployment-level safety induction for adversarially-generated actions. The
-kernel gate builds on Trident, a Lean 4 project on symbolic verification of
-Triton kernels.
+deployment-level safety induction for adversarially-generated actions, nor
+generalized across domains. The kernel gate builds on Trident, a Lean 4 project
+on formal semantics for Triton GPU kernels.
