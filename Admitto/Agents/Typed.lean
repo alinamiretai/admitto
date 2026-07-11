@@ -1,3 +1,4 @@
+import Admitto.Core
 /-!
 # Admitto.Agents.Typed — capability shield catching privilege amplification
 
@@ -133,3 +134,31 @@ def demoAuth : Auth :=
 
 -- Unprovisioned resource → REJECTED (false)
 #eval admitTyped demoAuth { resource := "/secrets", level := Level.read }
+
+/-! ## The typed shield as an instance of the generic construction -/
+
+open Admitto.Core
+
+/-- The typed capability shield, packaged as a `Shield`. The two proof
+    obligations are discharged from the existing lemmas: rejected ops are
+    definitionally no-ops, and admitted ops preserve `SafeAuth` (which
+    `stepTyped_preserves_safe` already proves for all ops). -/
+def typedShield : Shield Auth Op where
+  admit := admitTyped
+  Safe  := SafeAuth
+  step  := stepTyped
+  step_reject := by
+    intro s a h
+    unfold stepTyped
+    simp [h]
+  step_admit := by
+    intro s a hs _
+    exact stepTyped_preserves_safe s a hs
+
+/-- `typed_sound` is now literally the generic shield theorem, instantiated:
+    the typed capability shield is an instance of the one Admitto construction. -/
+theorem typed_sound_via_core (a : Auth) (hs : SafeAuth a) (ops : List Op) :
+    SafeAuth (typedShield.run a ops) :=
+  typedShield.sound a hs ops
+
+#print axioms Admitto.Agents.Typed.typed_sound_via_core
