@@ -1,0 +1,20 @@
+name = "trident"
+version = "0.1.0"
+defaultTargets = ["Trident"]
+
+[[require]]
+name = "leanwuzla"
+git = "https://github.com/hargoniX/Leanwuzla.git"
+rev = "main"
+
+[[require]]
+name = "Cli"
+git = "https://github.com/mhuisi/lean4-cli.git"
+rev = "nightly-testing"
+
+[[lean_lib]]
+name = "Trident"
+
+[[lean_exe]]
+name = "trident"
+root = "Main"

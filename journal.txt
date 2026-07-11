@@ -1,0 +1,2668 @@
+
+═══════════════════════════════════════════════════════════════════════════════
+SESSION 2026-06-29 (cont.) — StatesFaithfulMem driver + load/store/make_range
+═══════════════════════════════════════════════════════════════════════════════
+
+PERSISTED & PROVEN (zero sorry, in Soundness.lean):
+- Checker.lean: 0 sorry (normalizeExpr_correct, symCheck_sound, all beq lemmas)
+- Symbolic.lean: 0 sorry (DecidableEq Expr)
+- load_tensor_faithful_when_memory_unchanged   (unmasked load)
+- store_tensor_faithful_when_memory_unchanged  (unmasked store)
+- zip_foldl_eq_range + 8 fold-projection lemmas (con/sym _foldl_ pid/bs/gs/env)
+- make_range arm of evalInstr_faithful (was sorry; symbolic now uses sizeOpt.getD)
+- StatesFaithfulMem DRIVER STACK (Section 7):
+    StatesFaithfulMem := StatesFaithful ∧ s.memory = mem
+    evalInstr_preserves_memory_of_ne_store
+    evalInstr_faithful_mem   (single per-instr dispatcher; load handled internally)
+    prefix_faithful_mem      (fold dispatcher over non-store prefix)
+    evalKernel_append / symEvalKernel_append
+    kernel_faithful_terminal_store  (CAPSTONE: prefix++[store] faithful end-to-end)
+- zip_add_getD (guard-independent list helper for addi/addf tensor+tensor)
+
+KEY ARCHITECTURE: load faithfulness REQUIRES s.memory = mem (Expr.load reads the
+fixed mem; concrete load reads current s.memory; agree only pre-store / no-RAW).
+StatesFaithfulMem carries this; store EXITS the regime (memory diverges) so it's a
+terminal transition. Driver = [non-store prefix] ++ [store]. This is the no-RAW
+class, the sound checkable restriction.
+
+REMAINING 4 sorry'd decls in Soundness: load_masked(431), store_masked(498),
+cmpi_slt(527), evalInstr_faithful(555 — has ~80 internal sorries: load/store arms
+now REDUNDANT since driver routes around them; + float/cmpi/exotic ops + the
+tensor+tensor arms of addi/addf/muli/splat that the tutorial actually hits).
+
+>>> QUEUED FIRST FOR NEXT SESSION (edits TRUSTED models — start clean) <
+GENUINE MODEL-FIDELITY GAP found this session:
+  Elementwise tensor+tensor (addi/muli/addf): concrete guards on SHAPE (sh==sh2),
+  symbolic symAdd/symMul has NO guard (binds with first tensor's length).
+  -> faithfulness FALSE for shape-mismatched operands. Latent soundness gap.
+DECISION (made with user): length-guard BOTH evaluators. Elementwise faithfulness
+  depends on element COUNT not shape. Sound for well-typed TTIR (shape-match <=>
+  length-match). Add shape/length-compat validation to PARSER as ingest gate;
+  soundness theorem assumes well-typed input. Then prove addi/muli/addf
+  tensor+tensor faithful UNIFORMLY (no per-kernel obligation).
+  hten already pins symbolic length = concrete vals.length (Soundness.lean:29),
+  which is why length is the natural alignment criterion.
+  addi tensor+tensor proof already validated in /tmp (shape-guarded form) — redo
+  under length guard after model edit. See decision comment block above
+  zipWith_add_getD' in Soundness.lean.
+
+PATH TO "any vector-add .ttir" (4 steps; we are mid-step-2):
+  1. [DONE] StatesFaithfulMem driver + load/store/make_range
+  2. [IN PROGRESS] close tutorial's compute-op tensor+tensor cases (needs model
+     fix above), extract per-op faithful lemmas, build tutorial hstep dispatcher,
+     prove initial StatesFaithfulMem, rewire symCheckTutorial_sound through
+     kernel_faithful_terminal_store. THIS retires the tutorial's sorry chain.
+  3. generalize init-state lemma (read kernel's actual declared args, not fixed list)
+  4. characterize which vector-add expr shapes normalizeExpr canonicalizes
+     = the real "any vector-add" class; CLI honestly reports in/out of class.
+
+NOTE: "any vector-add .ttir, zero per-file proof" = step 4, bounded by normalizer
+completeness (open-ended). Honest claim achievable: "any vector-add kernel whose
+output normalizes to the spec," with CLI reporting which side of the line.
+
+─── WELLFORMEDNESS DESIGN (path A, settled 2026-06-29) ───────────────────────
+Live-file findings:
+- TritonValue.tensor (shape : List Nat) (vals : List Int) — NO length enforcement
+  (Values.lean ~line 17). Same for ftensor.
+- Construction convention ALREADY USES shape-product as length:
+  Semantics.lean:47,271,550 use (List.replicate (shape.foldl (· * ·) 1) x).
+  Symbolic.lean:242 uses (shape.foldl (· * ·) 1) for splat length.
+  => WF predicate formalizes an EXISTING convention, not a new imposition.
+- Parser.lean (147 lines) extracts shapes from tensor<...> tokens but does NO
+  shape-compatibility validation. The ingest gate is genuinely new but localized.
+
+WF PREDICATE:
+  def TritonValue.WF : TritonValue → Prop
+    | tensor sh vals  => vals.length = sh.foldl (· * ·) 1
+    | ftensor sh vals => vals.length = sh.foldl (· * ·) 1
+    | _ => True
+
+WHY NO 59-SITE THREADING (the "not boilerplate" insight):
+  Don't carry WF as a running StatesFaithful invariant. Instead:
+  (1) Each op LOCALLY produces a wellformed tensor — provable per-op from its
+      construction (they use shape.foldl or are length-preserving maps/zips).
+  (2) Kernel ARGUMENTS (the only tensors not produced by an op) get WF from the
+      PARSER GATE at ingest.
+  => WF of any elementwise operand follows locally from whatever produced it.
+  => No global invariant threading; no per-kernel proof obligation.
+
+ELEMENTWISE FAITHFULNESS UNDER WF:
+  At addi/muli/addf tensor+tensor: concrete guards sh==sh2, symbolic (now)
+  guards length==length. With both operands WF: sh==sh2 ⟹ shape-products equal
+  ⟹ lengths equal. So in the concrete-binds branch (sh==sh2), the symbolic guard
+  also passes, both bind, zip aligns. In the sh≠sh2 branch, IF lengths also differ
+  both give none (faithful); the only residual case (sh≠sh2 but lengths equal) is
+  EXCLUDED by... still needs care — shape-product equal doesn't imply shape equal
+  (e.g. [2,3] vs [6] both product 6). So concrete (sh-guard) gives none but
+  symbolic (len-guard) binds => MISMATCH REMAINS for [2,3] vs [6].
+  RESOLUTION OPTIONS for next session (PICK ONE):
+    (a) parser gate also normalizes/rejects rank-ambiguous shapes so every tensor
+        in a vector-add kernel is rank-1 ([n]) — then shape==shape ⟺ length==length
+        exactly. Cleanest for vector-add (all tensors are [bs]).
+    (b) make symbolic track shape not just length (bigger change to SymValue).
+  LEAN: (a) — vector-add kernels are all rank-1; parser gate enforces rank-1 for
+  the supported class. Documents the supported class honestly.
+
+NEXT SESSION ORDER:
+  1. Define TritonValue.WF + SymValue side (or rank-1 restriction).
+  2. Parser gate: validate rank-1 + shape-compat on ingest (decidable, syntactic).
+  3. Prove addi/muli/addf tensor+tensor faithful under WF/rank-1 (redo /tmp proof).
+  4. Extract per-op faithful lemmas; build tutorial hstep dispatcher.
+  5. Prove initial StatesFaithfulMem; rewire symCheckTutorial_sound through
+     kernel_faithful_terminal_store. Retires tutorial sorry chain.
+─────────────────────────────────────────────────────────────────────────────
+
+─── CORRECTION after reading FULL live Parser.lean + Values.lean + Dialect.lean ───
+(2026-06-29, grounded in actual files not uploads)
+
+KEY CORRECTION to wellformedness design:
+- The text parser (parseKernelVerbose/parseLine) does NO shape validation. It
+  produces TritonInstr (op + string args) purely syntactically. TritonOp.arity
+  EXISTS (Dialect.lean:99) but is NOT called by the parser — the "used by parser
+  for validation" comment is aspirational; no validation pass exists.
+- CRUCIAL: shapes are NOT known at parse time. TritonValue tensors (which carry
+  shape : List Nat) only come into existence during evalKernel EXECUTION. So a
+  "parser gate checking tensor shape-compat" is IMPOSSIBLE as previously framed —
+  the parser has only op names + var refs, no shapes.
+
+REVISED ARCHITECTURE for wellformedness:
+  WF is a property OF THE EVALUATION, established per-op LOCALLY:
+  - Each op's evalOp PRODUCES a wellformed (rank-1, length-correct) tensor —
+    provable per-op from its construction (splat/make_range use shape.foldl;
+    addptr/addi/etc are length-preserving maps/zips).
+  - Therefore every operand at any elementwise use-site is WF by construction
+    from whatever produced it. No global StatesFaithful threading needed.
+  - The SUPPORTED-CLASS gate (rank-1 restriction) is a DECIDABLE PREDICATE over
+    the parsed TritonKernel instruction list (NOT the text parser), run before
+    verification. It can use symbolic shape inference over the instr list.
+
+EXISTING DUPLICATE TO RECONCILE:
+  Values.lean:93 ALREADY HAS `zipWith_add_getD (a b) (i) (h_len : a.length =
+  b.length)` — a complete proven lemma (handles in-bounds AND out-of-bounds).
+  I added a near-identical `zip_add_getD` to Soundness.lean this session.
+  NEXT SESSION: use the existing Values.lean one; remove my duplicate OR keep
+  only if signature differs usefully (mine needs hi : i < a.length; theirs
+  doesn't — theirs is more general, PREFER THEIRS).
+
+CONCRETE MODEL IS CONSISTENTLY SHAPE-GUARDED:
+  TritonValue.zipWith (Values.lean:54) guards on s1==s2 (full shape List equality).
+  evalOp addi/muli/etc mirror this. Symbolic now length-guards (this session).
+  For RANK-1 tensors ([n]): sh==sh2 ⟺ [n_a]==[n_b] ⟺ n_a==n_b ⟺ lengths equal.
+  So under rank-1 restriction the guards COINCIDE EXACTLY — no gap, faithfulness
+  closes. The [2,3]-vs-[6] ambiguity cannot arise (forced single-element shapes).
+
+NEXT SESSION ORDER (revised):
+  1. Define WF predicate: rank-1 + length-correct. Decide: prop on TritonValue
+     or restriction baked into per-op faithfulness hypotheses.
+  2. Per-op "produces WF rank-1 output" lemmas (local, from construction).
+  3. Re-prove addi/muli/addf tensor+tensor faithful under rank-1 (guards coincide).
+     Use existing Values.lean zipWith_add_getD; drop my Soundness duplicate.
+  4. Extract per-op faithful lemmas; tutorial hstep dispatcher.
+  5. Initial StatesFaithfulMem; rewire symCheckTutorial_sound through capstone.
+  6. (Class gate) decidable rank-1 predicate over TritonKernel for CLI honesty.
+─────────────────────────────────────────────────────────────────────────────
+
+─── PERSISTED: WF1 + bridge (2026-06-29, build green) ────────────────────────
+ADDED TO Values.lean (both persisted, build green, Soundness still 4 sorry):
+- TritonValue.WF1 : rank-1 wellformedness
+    | tensor sh vals  => sh = [vals.length]
+    | ftensor sh vals => sh = [vals.length]
+    | _ => True
+- wf1_shape_iff_length : (sha==shb) = (xs.length==ys.length) for WF1 tensors.
+    Proof: simp only [WF1] at hyps; subst; simp.
+  THIS IS THE KEYSTONE — makes concrete shape-guard = symbolic length-guard.
+
+VALIDATED IN /tmp (ready to wire next session) — addi tensor+tensor under WF1:
+  Structure (both branches, against live length-guarded symAdd):
+    obtain ga/gb from hten; simp only [WF1] at hwa hwb;
+    simp only [evalInstr,symEvalInstr,symEvalOp,evalOp,h_op,h_args,
+      MachineState.lookup,h_la,h_lb,Option.bind_some,SymState.lookup,hsga,hsgb,symAdd];
+    by_cases hlen : xs.length = ys.length
+    · have hshape : sha == shb := by rw [hwa,hwb]; simp [hlen]
+      rw [if_pos hshape]; rw [if_pos (by simp [hlen] : (xs.length==ys.length)=true)]
+      have hlen2 : xs.length = ((xs.zip ys).map (·.1+·.2)).length := by
+        simp [List.length_zip, hlen]
+      rw [hlen2]; apply bind_tensor_faithful hp hbs hgs hmem hsc hten hnone;
+      intro i hi; rw [← hlen2] at hi; simp only [evalExpr];
+      rw [hega i hi, hegb i (hlen ▸ hi), zip_add_getD xs ys i hi hlen]
+    · have hshape : (sha==shb)=false := by rw [hwa,hwb]; simp [hlen]
+      rw [if_neg (by simp [hshape])]; rw [if_neg (by simp [hlen])];
+      exact ⟨hp,hbs,hgs,hmem,hsc,hten,hnone⟩
+  (use the REAL private bind_tensor_faithful when pasting INTO Soundness.lean;
+   zip_add_getD already in Soundness.lean — note Values.lean ALSO has
+   zipWith_add_getD which is more general; reconcile the duplicate.)
+  muli/addf tensor+tensor = IDENTICAL structure, swap Expr.add->mul/float +
+  zip helper analog. Mechanical repeats once addi lands.
+
+NEXT SESSION immediate: paste addi-under-WF1 into Soundness addi tensor+tensor
+arm (the line ~684 sorry); repeat for muli/addf; then extract per-op lemmas,
+thread WF1 as hypothesis through evalInstr_faithful_mem's compute step, build
+tutorial dispatcher, rewire symCheckTutorial_sound through capstone.
+─────────────────────────────────────────────────────────────────────────────
+
+─── WF1 THREADING DECISION: OPTION 2 (local, no invariant) — settled w/ evidence ───
+(2026-06-29)
+
+DECISION: WF1 enters via per-op "produces WF1 output" lemmas, NOT as an invariant
+on StatesFaithful or StatesFaithfulMem. Elementwise ops take WF1 of operands as
+HYPOTHESES, discharged at the dispatcher from the produces-WF1 lemmas of the
+earlier instructions that produced those operands.
+
+EVIDENCE THIS IS SOUND & MINIMAL:
+- symVectorAddTutorialInitState binds ZERO tensor args (all scalars: a_base,
+  b_base, x_ptr, etc.). Every tensor in vector-add is OP-PRODUCED (make_range,
+  splat, addi, addptr, load). So operand WF1 is ALWAYS locally derivable from the
+  producing op. No tensor ever enters un-produced.
+- => NO changes to StatesFaithful (still 7 conjuncts), StatesFaithfulMem, or the
+  driver stack. Nothing re-tainted, nothing re-proven. ZERO threading cost.
+- Contrast Option 1 (8th conjunct): would re-establish WF1 at 59 construction
+  sites + re-taint every StatesFaithful proof. REJECTED.
+- Contrast Option 3 (bundle into StatesFaithfulMem): unnecessary — WF1 only needed
+  at elementwise use-sites, derivable there. REJECTED.
+
+VALIDATED IN /tmp (make_range produces WF1 — clean):
+  theorem make_range_produces_WF1 (sizeOpt args s) (sh vals)
+      (h : evalOp (.make_range sizeOpt) args s = some (tensor sh vals)) :
+      (tensor sh vals).WF1 := by
+    simp only [evalOp] at h; injection h with h; injection h with hsh hvals;
+    subst hsh; subst hvals; simp only [TritonValue.WF1];
+    simp [List.length_map, List.length_range]
+
+NEXT SESSION ORDER (revised, Option 2):
+  1. produces-WF1 lemmas: make_range (DONE /tmp), splat (rank-1 case, match-destructure),
+     addi/muli/addf/addptr (shape-preserving: output shape = input shape).
+  2. Paste addi/muli/addf tensor+tensor faithful-under-WF1 into their arms (proofs
+     validated; take hwa/hwb : WF1 hyps).
+  3. Extract per-op faithful lemmas (each takes operand WF1 hyps where elementwise).
+  4. Tutorial dispatcher: discharge each op's hstep; for elementwise ops supply
+     WF1 from the produces-WF1 lemma of the producing instruction.
+  5. Initial StatesFaithfulMem; rewire symCheckTutorial_sound through capstone.
+─────────────────────────────────────────────────────────────────────────────
+
+═══ PIVOTAL FINDING (assembly pass, 2026-06-29): symEval_sound is UNSOUND-AS-STATED ═══
+
+symEvalKernel_faithful (Soundness.lean) claims, for ANY kernel K and ANY
+StatesFaithful init: StatesFaithful (evalKernel K s) (symEvalKernel K ss) mem.
+Proved by induction using evalInstr_faithful at each step.
+
+BUT: evalInstr_faithful is FALSE for load in general (load faithfulness needs
+s.memory = mem; plain StatesFaithful doesn't provide it — this is WHY we built
+StatesFaithfulMem). So symEvalKernel_faithful AS STATED is not a sound theorem;
+it only "holds" because evalInstr_faithful's load/store arms are `sorry`. Those
+sorries mark a FALSE statement, not a fillable gap.
+
+CONSEQUENCE: "make symEval_sound sound by closing evalInstr_faithful" is
+IMPOSSIBLE — the signature (plain StatesFaithful, any kernel) asserts something
+false (load faithful w/o memory precondition). symCheckTutorial_sound currently
+routes through this, so the tutorial's soundness currently RESTS ON that false
+generality (native_decide gives the Bool = true; the SOUNDNESS theorem connecting
+it to real execution passes through the sorried false-general bridge).
+
+FORCED ARCHITECTURE (the honest rewire):
+- Replace symEval_sound's use in symCheckTutorial_sound with a path through
+  kernel_faithful_terminal_store (the driver capstone).
+- This carries the pre ++ [store] no-RAW precondition — a REAL, honest restriction.
+  "Any .ttir" soundly means "any no-RAW / terminal-store kernel", NOT any kernel.
+- LINCHPIN CONFIRMED: parsedInitState.memory = concreteMem a b DEFINITIONALLY
+  (both = layoutMemory a b; Equiv.lean:23, Checker.lean:208). So initial
+  StatesFaithfulMem's (s.memory = mem) conjunct is `rfl`.
+- SPLIT CONFIRMED (informally): parsedVectorAddFixed = take 12 ++ drop 12, drop 12
+  is [store], take 12 all non-store. (native_decide check hit free-var issue
+  because parsedVectorAddFixed is in RunCheck.lean, not imported into test — the
+  split reasoning must live where the kernel is in scope, i.e. RunCheck.lean, OR
+  pass the kernel + its split proof as params to a generic lemma.)
+
+REWIRE PLAN (next session, start fresh — this is a TRUSTED-BRIDGE interface change):
+  1. Land per-op faithfulness lemmas into Soundness.lean, each verified green:
+     - produces-WF1: make_range (done /tmp), splat, addi/muli/addf/addptr (shape-preserving)
+     - faithful: constant, get_program_id(0), muli, make_range, splat,
+       addi(t+t, /tmp-validated), addptr, load(via load_faithful_mem)
+  2. Build a generic driver-based soundness lemma taking K, its pre++[store] split,
+     hpre_step, hstore, + init StatesFaithfulMem -> memory faithfulness conclusion
+     (same shape symEval_sound gave). This REPLACES symEval_sound for no-RAW kernels.
+  3. Rewire symCheckTutorial_sound (Checker.lean) through it. Discharge the 12
+     prefix ops' faithfulness; elementwise ops get WF1 from produces-WF1 of producers.
+  4. Verify RunCheck.lean tutorial theorems still pass; build green.
+  5. THEN consider: mark old symEvalKernel_faithful/symEval_sound as deprecated or
+     restrict their signature to prevent unsound reuse.
+
+DO NOT rush step 2-3: replacing the core soundness bridge is the worst place for
+file-drift error. Start fresh with a full re-read of symCheckTutorial_sound +
+symEvalKernel_faithful + the driver stack.
+═══════════════════════════════════════════════════════════════════════════════
+
+─── LANDED (assembly pass, 2026-06-29, green): WF1-production lemmas ───────────
+Added to Soundness.lean (after zip_add_getD), build green, sorry still 4:
+- make_range_produces_WF1  (make_range output always rank-1)
+- splat_produces_WF1_rank1 (splat [n] output is rank-1; needs rank-1 instr shape)
+
+CRITICAL STRUCTURAL FACT found reading RunCheck.lean (the REAL tutorial kernel):
+- Tutorial's data combine is `addf` (line 21: c = a+b), NOT addi. addi is only
+  for INDEX arith (idx = voffset+range, line 15).
+- BUT concrete evalOp .addf handles INTEGER tensors directly (Semantics.lean:
+  tensor s1 xs, tensor s2 ys => if s1==s2 then tensor (zip +) else none) — same
+  structure as addi. AND symbolic .addf => symAdd (SAME function as addi!).
+  => addf tensor+tensor faithfulness = IDENTICAL proof to addi (both via symAdd,
+     both same concrete zip-guard). The addi-under-WF1 /tmp proof transfers to
+     addf verbatim (change op name only). NO separate addf logic needed.
+- Model unifies add/addf over Int (Values.lean works over Int). No float here.
+
+TUTORIAL KERNEL = parsedVectorAddFixed (RunCheck.lean:9), 13 instrs:
+  [constant 1024, get_program_id 0, muli, make_range (some 1024), splat [1024],
+   addi, addptr, addptr, addptr, load, load, addf] ++ [store]
+  = take 12 ++ drop 12; drop 12 = [store]; take 12 all non-store. (split confirmed)
+
+REWIRE TARGET (Checker.lean:364 symCheckTutorial_sound):
+  Currently routes through symEval_sound (UNSOUND-AS-STATED — see pivotal finding).
+  Replace with driver-based path through kernel_faithful_terminal_store.
+  LINCHPIN: parsedInitState.memory = concreteMem a b = layoutMemory a b (rfl),
+  so initial StatesFaithfulMem's (s.memory=mem) conjunct is rfl.
+  initStatesTutorial_faithful already gives the StatesFaithful half.
+
+NEXT SESSION (turnkey, start w/ fresh read of Checker.lean symCheckTutorial_sound
++ symEvalKernel_faithful + driver stack):
+  1. Land per-op FAITHFULNESS lemmas into Soundness.lean, each green:
+     constant, get_program_id(axis 0), muli(t+t via symAdd+WF1), make_range,
+     splat, addi(t+t, /tmp-validated), addf(t+t = same as addi), addptr, load
+     (load via load_faithful_mem from driver). Note: muli t+t uses symMul (also
+     length-guarded this session) — mirror addi proof w/ symMul + zip_mul helper.
+  2. Build generic driver soundness lemma: takes K, pre++[store] split, per-op
+     hstep (StatesFaithfulMem-preserving, discharging WF1 from produces-WF1),
+     hstore, init StatesFaithfulMem -> memory faithfulness. Routes through
+     kernel_faithful_terminal_store. HONEST replacement for symEval_sound (carries
+     no-RAW/terminal-store precondition).
+  3. Rewire symCheckTutorial_sound through it. Discharge 12 prefix ops.
+  4. Re-verify RunCheck.lean (checker_pid0/1, parsedVectorAddFixed_correct) green.
+  5. Optionally deprecate/restrict old symEval_sound to prevent unsound reuse.
+─────────────────────────────────────────────────────────────────────────────
+
+─── LANDED (assembly pass cont., 2026-06-29, all green, sorry still 4) ────────
+Per-op FAITHFULNESS lemmas now in Soundness.lean:
+  constant_faithful, get_program_id_faithful (axis 0),
+  make_range_faithful, splat_scalar_faithful
+WF1-production lemmas: make_range_produces_WF1, splat_produces_WF1_rank1
+All standalone, take StatesFaithful (or the 7 components), return StatesFaithful.
+splat_scalar takes the 7 components + operand scalar hyp (not bundled h).
+
+REMAINING per-op lemmas (harder — DO NOT underestimate):
+  - addi/addf tensor+tensor: /tmp-validated proof takes hwa hwb : WF1 hyps.
+    addf uses SAME symAdd as addi -> same proof, change op name.
+  - muli tensor+tensor: mirror addi but via symMul (length-guarded this session);
+    needs a zip_mul_getD helper (analog of zip_add_getD, structural induction).
+  - addptr tensor case (tutorial: addptr [scalar_ptr?, idx_tensor]) — CHECK actual
+    operand types in tutorial: x_ptr is scalar, idx is tensor -> scalar+tensor
+    addptr case. Read evalOp .addptr + symEvalOp .addptr arms.
+  - load: use driver's load_faithful_mem (already proven) — NOT a new faithful
+    lemma; the dispatcher calls it directly in the load branch.
+
+>>> THE NOVEL INTERCONNECTED PART (not yet built or tested) <
+The DISPATCHER that threads WF1: elementwise lemmas need hwa/hwb : WF1 of their
+operands. Those come from produces-WF1 lemmas of the PRODUCING instructions
+earlier in the kernel. Connecting "instr 6 (addi voffset range) operands are WF1
+because instr 4 (make_range) and instr 5 (splat) produced them WF1" is DISPATCHER
+LOGIC — a per-kernel or generic fold that tracks which var was produced by which
+op and carries WF1 forward. THIS IS THE JOINT between per-op lemmas and the driver
+and it has NEVER been built. It's the real remaining design+proof work, plus:
+  - driver soundness lemma (K, split, hstep, hstore, init SFM -> mem faithfulness)
+  - rewire symCheckTutorial_sound (Checker.lean:364) through it
+  - re-verify RunCheck.lean
+
+NEXT SESSION: start with the DISPATCHER design (how WF1 threads through the instr
+sequence) — that's the crux, harder than the remaining per-op lemmas. Then finish
+per-op lemmas, then rewire. Fresh read of Checker.lean + driver stack first.
+─────────────────────────────────────────────────────────────────────────────
+
+═══ FINDING that INVALIDATES the "Option 2 no-threading" decision (2026-06-29) ═══
+Read prefix_faithful_mem's hstep signature (live):
+  hstep : ∀ instr ∈ K, ∀ s ss mem, StatesFaithfulMem s ss mem ->
+            StatesFaithfulMem (evalInstr instr s) (symEvalInstr instr ss) mem
+CRUCIAL: hstep quantifies over EACH instruction in ISOLATION against an ARBITRARY
+state s. There is NO history — when discharging hstep for an addi/addf, you get a
+fresh universally-quantified s with no way to say "operand was produced WF1 by an
+earlier make_range/splat." The produced-by relationship is GONE at this signature.
+
+=> The "Option 2: WF1 is local, derived from producing op, no threading" decision
+   (recorded earlier) DOES NOT COMPOSE with the driver as built. The uniform
+   per-instruction hstep means elementwise ops can only get operand WF1 from an
+   INVARIANT on the state, not from history.
+
+FORCED CHOICE (real design fork, NOT mechanical — needs fresh design):
+  Option 1' (was "heavier"): StatesFaithfulMem (or StatesFaithful) must INCLUDE
+    "every tensor in s.env is WF1 (rank-1)". Then addi/addf get operand WF1 from
+    the invariant. Cost: prove every tensor-producing arm re-establishes WF1
+    (make_range/splat/addi/addf/addptr all produce rank-1 — the produces-WF1
+    lemmas we just built are EXACTLY these! they're reusable). Add WF1-conjunct to
+    the invariant; each op's faithful lemma also shows output WF1. This threads
+    WF1 as a state invariant — but the produces-WF1 lemmas already do the per-op
+    work, so it's less bad than feared.
+  Option 2' : change prefix_faithful_mem to carry accumulated var->producer
+    context. Bigger driver restructure.
+
+LEAN: Option 1' — add WF1-of-all-env-tensors as a conjunct. The produces-WF1
+lemmas (make_range_produces_WF1, splat_produces_WF1_rank1, + needed addi/addf/
+addptr/muli versions) are the per-op obligations, already partly built. The
+elementwise faithful lemmas consume operand WF1 from the invariant.
+
+GOOD NEWS on addptr: tutorial's addptr is scalar+tensor (x_ptr scalar, idx tensor).
+That case has NO shape guard (only tensor+tensor guards). So addptr scalar+tensor
+is faithful WITHOUT WF1. Only addi/addf/muli tensor+tensor need operand WF1.
+
+NEXT SESSION: design the WF1-invariant (Option 1'). Decide: 8th conjunct on
+StatesFaithful, or a separate WFState predicate bundled into the driver alongside
+StatesFaithfulMem. Then per-op "preserves WF1-invariant" + "faithful" together.
+DO NOT proceed on the old Option-2 plan — it doesn't compose.
+═══════════════════════════════════════════════════════════════════════════════
+
+═══ CRUX SOLVED: combined WF1 driver landed (2026-06-29, green, sorry 4) ═══════
+The hstep-signature problem (WF1 can't thread through per-instruction isolation)
+is SOLVED by a COMBINED invariant, StatesFaithful UNTOUCHED:
+  WFState s := ∀ v sh vals, s.env v = some (tensor sh vals) → (tensor sh vals).WF1
+  FaithfulWF s ss mem := StatesFaithfulMem s ss mem ∧ WFState s
+  + WFState_bind_tensor, WFState_bind_scalar (bind preserves WFState)
+  + prefix_faithful_wf (combined fold)
+  + kernel_faithful_wf_terminal_store (combined capstone -> StatesFaithful)
+ALL LANDED in Soundness.lean, green. This supersedes the invalidated Option-2 plan
+AND avoids modifying StatesFaithful (the parallel-invariant win).
+
+REMAINING = SLOT-FILLING (no more design forks; every piece has a proven base):
+  1. Per-op COMBINED step lemmas (FaithfulWF -> FaithfulWF), combining each op's
+     existing faithful lemma + WFState preservation:
+     - constant/get_program_id: faithful lemma + WFState_bind_scalar
+     - make_range/splat: faithful lemma + WFState_bind_tensor (WF1 from produces-WF1)
+     - addi/addf (symAdd) / muli (symMul): elementwise faithful-under-WF1 (validated
+       for addi; addf=same; muli needs zip_mul_getD helper) — operand WF1 from the
+       INCOMING WFState component; output WF1 via WFState_bind_tensor
+     - addptr scalar+tensor: NO shape guard, NO WF1 needed; faithful + WFState_bind_tensor
+       (output tensor = offs.map(+base), WF1 if idx tensor was — from incoming WFState)
+     - load: load_faithful_mem (proven, in StatesFaithfulMem form — need to lift to
+       FaithfulWF: load output tensor = addrs.map readMem, WF1 if addr tensor was)
+  2. hstore for terminal store (store helper proven; lift to take FaithfulWF)
+  3. initial FaithfulWF: StatesFaithfulMem via initStatesTutorial_faithful + s.memory=mem
+     rfl (both layoutMemory a b); WFState TRIVIAL (init env has ZERO tensors — all
+     scalars, confirmed).
+  4. Assemble 12-instr hpre_step dispatcher (explicit per-instruction, WF1 discharges
+     as real checked terms); apply kernel_faithful_wf_terminal_store.
+  5. Rewire symCheckTutorial_sound (Checker.lean:364) through it, replacing the
+     unsound-as-stated symEval_sound. Re-verify RunCheck.lean green.
+
+NOTE addptr/load WFState preservation: both produce output tensor from mapping the
+INPUT tensor (same length), so output WF1 follows from input WF1 (incoming WFState).
+Need small produces-WF1 lemmas for addptr(scalar+tensor) and load. Straightforward.
+═══════════════════════════════════════════════════════════════════════════════
+
+─── BUILD-VERIFICATION LESSON + scope fix (2026-06-29) ────────────────────────
+CRITICAL PROCESS FIX: `lake build` (full) uses CACHE and reported "success" while
+the four per-op faithful lemmas DID NOT COMPILE (scope error). Only
+`lake build Trident.Proofs.Soundness` (module recompile) revealed it.
+=> ALWAYS verify landings with `lake build Trident.Proofs.Soundness`, NOT cached
+   `lake build`. The cached full build can mask real per-module errors.
+
+SCOPE BUG (fixed): constant_faithful/get_program_id_faithful/make_range_faithful/
+splat_scalar_faithful landed at lines 158-224, BEFORE the private helpers
+bind_scalar_faithful (452) / bind_tensor_faithful (487). Private helpers not in
+scope => "unknown identifier". FIX: relocated all four to AFTER the private
+helpers (into Section 5, ~line 531+). Now genuinely compiles green, 4 sorries,
+FaithfulWF + all four faithful lemmas visible on import (verified via #check).
+
+Note: zip_add_getD + make_range_produces_WF1 + splat_produces_WF1_rank1 (lines
+107-155) are FINE where they are — they use only public list lemmas + WF1, not the
+private bind helpers.
+
+CURRENT VERIFIED STATE (module recompile confirmed, sorry 4):
+- Driver stack (StatesFaithfulMem + faithful_mem dispatcher + prefix + capstone) ✓
+- Combined WF1 driver (WFState, FaithfulWF, prefix_faithful_wf,
+  kernel_faithful_wf_terminal_store, WFState_bind_tensor/scalar) ✓
+- WF1 + wf1_shape_iff_length (Values.lean) ✓
+- produces-WF1: make_range, splat ✓
+- per-op faithful: constant, get_program_id(0), make_range, splat_scalar ✓
+- symbolic length-guard (symAdd/symMul) ✓
+- tutorial still verifies end-to-end ✓
+
+NEXT (slot-filling, unchanged from prior plan): per-op COMBINED step lemmas
+(FaithfulWF->FaithfulWF) via constant_step pattern [validated /tmp]; then
+elementwise (addi/addf/muli), addptr, load steps; hstore; init FaithfulWF;
+assemble hpre_step; rewire symCheckTutorial_sound. VERIFY EACH with module build.
+─────────────────────────────────────────────────────────────────────────────
+
+═══ PER-OP LAYER COMPLETE (2026-06-29, all module-build verified, sorry 4) ═════
+ALL landed in Soundness.lean, verified via `lake build Trident.Proofs.Soundness`:
+
+Faithfulness lemmas (Section 5, after private bind helpers):
+  constant_faithful, get_program_id_faithful, make_range_faithful,
+  splat_scalar_faithful, addi_tt_faithful, addf_tt_faithful, addptr_st_faithful
+Produces-WF1: make_range_produces_WF1, splat_produces_WF1_rank1
+WF1 machinery: WF1 (Values.lean), wf1_shape_iff_length (Values.lean), zip_add_getD
+Combined driver: WFState, WFState_bind_tensor/scalar, FaithfulWF,
+  prefix_faithful_wf, kernel_faithful_wf_terminal_store
+COMBINED STEP lemmas (FaithfulWF -> FaithfulWF), ALL 8 tutorial ops:
+  constant_step, get_program_id_step, make_range_step, splat_step,
+  addi_step, addf_step, addptr_step, load_step
+  (load_step routes StatesFaithfulMem half through evalInstr_faithful_mem's
+   built-in load branch; addi/addf pull operand WF1 from WFState invariant,
+   prove output WF1 both shape-branches; addptr/load single-branch, no shape guard)
+
+Model fix persisted: symAdd/symMul length-guarded (Symbolic.lean).
+Tutorial still verifies end-to-end. StatesFaithful NEVER modified.
+
+>>> REMAINING: ASSEMBLY ONLY (no new per-op proofs) <
+  1. hstore: terminal store lemma FaithfulWF -> StatesFaithful. Use the proven
+     store_tensor_faithful_when_memory_unchanged (needs its hyps: concrete addrs,
+     addr/val WF1 from FaithfulWF, memory pristine from StatesFaithfulMem).
+     CHECK store helper's exact signature/hyps first.
+  2. initial FaithfulWF for tutorial: StatesFaithfulMem via initStatesTutorial_faithful
+     + s.memory=mem (rfl, both layoutMemory); WFState TRIVIAL (init env all scalars,
+     zero tensors -> WFState vacuously true).
+  3. hpre_step dispatcher: for parsedVectorAddFixed's 12 prefix instrs, dispatch each
+     to its *_step lemma. EXPLICIT per-instruction (12-way match on the instr). The
+     operand-lookup hyps (h_la/h_lb/h_lp/h_lo) for addi/addf/addptr/load/splat come
+     from the fact that earlier instructions bound those vars — need to establish
+     "after instrs 0..k, env has var X = tensor/scalar ...". THIS is the fiddly part:
+     the dispatcher must know what each var holds at each program point. Options:
+     (a) prove per-instruction "env lookup after prefix" facts, or
+     (b) make each _step lemma's operand hyps dischargeable from FaithfulWF alone.
+     NOTE: this is the last genuinely intricate bit — connecting var bindings across
+     the sequence. Think carefully here.
+  4. Apply kernel_faithful_wf_terminal_store; rewire symCheckTutorial_sound
+     (Checker.lean:364) replacing symEval_sound; re-verify RunCheck.lean.
+
+VERIFY EVERY landing with `lake build Trident.Proofs.Soundness` (NOT cached lake build).
+═══════════════════════════════════════════════════════════════════════════════
+
+─── muli scalar gap caught + filled (2026-06-29, green, sorry 4) ──────────────
+AUDIT of tutorial operand types revealed muli [pid, c1024_i32] is SCALAR×SCALAR
+(not tensor+tensor). All prior elementwise work was tensor+tensor. Built+landed:
+  muli_scalar_faithful (via TritonValue.zipWith scalar case + bind_scalar_faithful)
+  muli_scalar_step (scalar output, WFState_bind_scalar)
+NOW ALL 12 PREFIX INSTRUCTIONS have step lemmas:
+  1 constant_step  2 get_program_id_step  3 muli_scalar_step  4 make_range_step
+  5 splat_step  6 addi_step  7,8,9 addptr_step  10,11 load_step  12 addf_step
+
+ASSEMBLY DESIGN DECIDED: Option A (explicit sequential), validated feasible:
+  - (evalInstr {constant v} s).env "c" = some (scalar v)  [proven, reads back binding]
+  - (evalInstr {..} s).env other = s.env other for other≠result [proven, if_neg]
+  So chain the 12 steps explicitly from initState, tracking each binding, discharging
+  each step's operand-lookup hyps from prior instructions' concrete bindings.
+  (The uniform prefix_faithful_wf fold CAN'T discharge operand lookups — arbitrary s
+  has no binding info — so explicit sequential is the sound approach.)
+
+REMAINING (pure assembly, no new per-op proofs):
+  1. hstore (terminal store): FaithfulWF -> StatesFaithful via
+     store_tensor_faithful_when_memory_unchanged. CHECK its exact hyps first
+     (concrete addrs, addr/val correspondence, memory pristine).
+  2. initial FaithfulWF: initStatesTutorial_faithful gives StatesFaithful; s.memory=mem
+     rfl; WFState vacuous (init env all scalars).
+  3. Explicit 12-step chain: tutorial_prefix_faithful, applying each _step with
+     operand lookups discharged from reading back prior bindings. Verbose but sound.
+  4. Apply kernel_faithful_wf_terminal_store; rewire symCheckTutorial_sound.
+─────────────────────────────────────────────────────────────────────────────
+
+─── hconcrete DESIGN RESOLVED: (b) native_decide, decidable property (2026-06-29) ──
+KEY FINDING: concreteness is NOT a uniform state invariant — Expr.isConcrete says
+.var=false, .load=false, .lit=true, add/mul/max = conjunction. LOAD produces
+non-concrete exprs, so a "all tensors concrete" invariant is FALSE. Concreteness
+is per-variable and load-breaking, unlike WFState (which every op preserves).
+
+BUT the store helper only needs the ADDRESS operand (gp) concrete, NOT the value
+operand (which is loaded, non-concrete — correctly not required).
+
+Tutorial address chain is ALL concrete: get_program_id -> Expr.lit(pid) [line 233],
+init binds output_ptr etc as Expr.lit, muli/addi/addptr/splat/make_range build via
+add/mul of lits -> isConcrete=true throughout. Value chain (c=load+load) is
+non-concrete but store doesn't need it.
+
+DECISION: (b) native_decide per-kernel. isConcrete is DECIDABLE; for a concrete
+kernel native_decide settles address-concreteness automatically, ZERO user proof.
+This is the RIGHT tool for a decidable property and generalizes to any kernel free.
+Threading (a) would need hand-proved per-op concreteness-preservation lemmas +
+selective per-variable bookkeeping for load — MORE infra, LESS general, for a
+already-decidable fact. (a) rejected after finding concreteness isn't uniform.
+
+VALIDATED: cptrConcreteCheck (via List.range 1024 |>.all (g i).isConcrete) for the
+prefix, native_decide passes for pid=0 AND pid=1. So hconcrete is dischargeable.
+
+Architectural note: address-concreteness belongs in the future ingest/RAW-hazard
+CHECKER (syntactic pass at verify-time), alongside the existing symCheck
+native_decide. Both are decidable per-kernel facts the CLI checks automatically.
+
+NEXT (assembly, hconcrete now unblocked):
+  1. hstore: discharge store helper hyps. haddr/hval from StatesFaithful.hten;
+     hconcrete via native_decide (cptrConcreteCheck pattern); h_lp/h_lv/hlen/hgp/
+     hgv_corr from the prefix bindings + hten.
+  2. initial FaithfulWF (init faithful + rfl + vacuous WFState).
+  3. explicit 12-step chain (Option A).
+  4. apply kernel_faithful_wf_terminal_store; rewire symCheckTutorial_sound.
+─────────────────────────────────────────────────────────────────────────────
+
+═══ CHAINING MECHANIC FULLY VALIDATED (2026-06-29) — assembly is turnkey ═══════
+initFaithfulWF_tutorial LANDED in Checker.lean (green, module build). All 9 step
+lemmas + driver + hconcrete mechanism proven. The Option-A explicit chain works:
+
+VALIDATED 3-step chain pattern (constant -> get_program_id -> muli_scalar):
+  simp only [pre, evalKernel, symEvalKernel, List.foldl_cons, List.foldl_nil]
+  have h0 := initFaithfulWF_tutorial a b pid bs gs
+  have h1 := constant_step {result:="c1024_i32", op:=.constant 1024, args:=[]} 1024 rfl h0
+  have h2 := get_program_id_step {result:="pid", op:=.get_program_id 0, args:=[]} rfl h1
+  have hpid : (evalInstr gpid (evalInstr const (parsedInitState a b pid bs gs))).env "pid"
+      = some (scalar (Int.ofNat pid)) := by
+    simp [evalInstr, evalOp, MachineState.bind, parsedInitState]
+  have hc : (...).env "c1024_i32" = some (scalar 1024) := by
+    simp [evalInstr, evalOp, MachineState.bind, parsedInitState]
+  exact muli_scalar_step {result:="offset", op:=.muli, args:=["pid","c1024_i32"]}
+    "pid" "c1024_i32" rfl rfl (Int.ofNat pid) 1024 hpid hc h2
+KEY FACTS CONFIRMED:
+- step lemmas chain via EXPLICIT instr records (not _, which can't infer op from rfl)
+- h2 has exact nested-evalInstr form matching the goal's inner structure
+- operand lookups discharge via `simp [evalInstr, evalOp, MachineState.bind, parsedInitState]`
+  (full simp, NOT simp only — needs to decide string BEq + resolve .pid field)
+
+FULL ASSEMBLY RECIPE (turnkey — all mechanisms proven, just verbose to assemble):
+  1. tutorialPrefix_faithfulWF: extend to all 12 instrs. Each op: apply its _step with
+     explicit instr record; discharge operand lookups (+ tensor shape/vals args) via
+     the simp pattern. WATCH: by instr 12 the nested evalInstr stack is 11 deep — simp
+     may need maxHeartbeats bump. addi/addf/addptr/load need operand shapes+vals.
+  2. hstore: FaithfulWF(pre-store) -> StatesFaithful via
+     store_tensor_faithful_when_memory_unchanged. 7 hyps: h_lp/h_lv (cptr/c tensors,
+     simp), hlen (both 1024), hgp/hgv_corr (from hten), hconcrete (native_decide,
+     cptrConcreteCheck VALIDATED pid 0,1), haddr/hval (from hten).
+  3. kernel_faithful_wf_terminal_store; split = List.take 12 ++ List.drop 12.
+  4. Rewire symCheckTutorial_sound: replace symEval_sound call w/ driver path;
+     memory faithfulness from StatesFaithful conjunct + existing normalizeWithMem_correct
+     + vectorAddSpecExpr_correct.
+  5. Re-verify RunCheck.lean green.
+VERIFY every landing with module build, NOT cached lake build.
+═══════════════════════════════════════════════════════════════════════════════
+
+─── ASSEMBLY REFINEMENT: carry-forward mechanism (2026-06-29, env_bind_ne landed) ──
+IMPORTANT: the original recipe's "discharge operand lookups via deep simp" CHOKES
+at depth — full `simp` on an 11-deep evalInstr stack gets stuck unfolding
+parsedInitState's env lambda (nested if name="pid"...). Confirmed failure at depth 4-5.
+
+ROBUST REPLACEMENT (validated): carry operand lookups forward one layer at a time.
+LANDED env_bind_ne in Soundness.lean:
+  env_bind_ne (s instr w val) (hbind : evalInstr instr s = s.bind instr.result val)
+    (hne : w ≠ instr.result) : (evalInstr instr s).env w = s.env w
+Usage to carry lookup of "offset" past the make_range instr (binds "range"):
+  rw [env_bind_ne s _ "offset" (tensor [(some 1024).getD s.block_size] (map ofNat range))]
+  · exact <prior lookup>       -- the carried-in fact
+  · simp only [evalInstr, evalOp]   -- proves hbind (instr = s.bind result val)
+  · decide                          -- proves w ≠ result (string ineq)
+VALIDATED compositional read-back too:
+  (evalInstr muli s).env "offset" = scalar (x*y) given operand lookups hx,hy:
+    simp only [evalInstr,evalOp,MachineState.lookup,hx,hy,Option.bind_some,
+      TritonValue.zipWith,MachineState.bind]; simp
+
+CHAIN STRUCTURE (revised, robust):
+  - after each step_k, ALSO record what it bound: bind_k : state_k.env "resultname" = <val>
+    (via simp only [evalInstr, evalOp, ...] on the one-layer binding)
+  - to feed op at step n an operand bound at step m<n: take bind_m, apply env_bind_ne
+    once per instr between m and n to carry it to state_(n-1). Each carry: supply that
+    instr's hbind (simp only [evalInstr,evalOp]) + decide (string ineq).
+  - operand values needed by step lemmas (esp addi/addf shapes+vals): inferred from the
+    carried lookup facts (metavars unify from h_la/h_lb).
+
+Muli value form: offset = scalar (Int.ofNat pid * 1024) — CHECK exact form when
+building (Int.ofNat coercion + mul order); use trace_state with dummy RHS to read it.
+
+REMAINING unchanged: full 12-step chain (now via carry mechanism) + hstore + rewire.
+All mechanisms proven. env_bind_ne + compositional read-back are the tools.
+─────────────────────────────────────────────────────────────────────────────
+
+═══ PIVOTAL REDIRECTION: generic fold, NOT per-kernel chain (2026-06-29) ═══════
+GOAL RESTATED by user: any .ttir verified by ONE cli command, ZERO user proof-writing.
+=> The explicit 200-line per-kernel chain (carries hardcoded to parsedVectorAddFixed's
+   exact 12 instrs) is a DEAD END for this goal — breaks for any different kernel.
+   ABANDONED. (env_bind_ne + binding toolkit still useful/landed, not wasted.)
+
+RIGHT FOUNDATION: generic fold soundness with a DECIDABLE per-instruction checker.
+  - Make each per-op step GENERIC: FaithfulWF preserved from ARBITRARY state (no
+    operand-lookup hyps). Operands read from env; if tensors, WFState gives WF1
+    (faithfulness follows via existing addi_step etc); malformed cases handled.
+  - VALIDATED: addi_step_generic's tensor+tensor case routes through proven addi_step
+    and typechecks (0 errors). Malformed-operand cases remain (sorry'd).
+  - Then prefix_faithful_wf's hstep discharges UNIFORMLY (every op preserves FaithfulWF
+    from any state) => fold gives soundness for ANY kernel, ZERO per-kernel proof.
+
+KEY RISK identified: concrete vs symbolic must STAY IN SYNC on malformed operands
+(e.g. addi on (scalar,tensor)). If they diverge, generic step is FALSE for that case
+=> need a decidable WELL-FORMEDNESS CHECKER precondition per instruction (operands
+present + right types), which the CLI runs via native_decide. Generic step lemmas
+are conditioned on it. This is the honest architecture:
+  theorem kernel_faithful_generic (K) (hcheck : wfCheck K = true) (hinit : FaithfulWF)
+    : StatesFaithful (evalKernel K ..) (symEvalKernel K ..) mem
+  User runs: cli verify K  ->  native_decide discharges wfCheck K = true, done.
+
+BUILD PLAN (reusable foundation, > 1 evening):
+  1. Define decidable per-instruction wfCheck (operands present, correct arity/types
+     for each op). Returns Bool. native_decide-able per kernel.
+  2. Generic step lemmas (one per op): given wf-instruction + FaithfulWF (arbitrary
+     state) -> FaithfulWF preserved. Route well-formed case through existing _step
+     lemmas; malformed excluded by wfCheck.
+  3. Generic fold soundness: wfCheck K = true + init FaithfulWF -> prefix FaithfulWF,
+     then terminal store -> StatesFaithful. (kernel_faithful_wf_terminal_store exists.)
+  4. Instantiate for tutorial: wfCheck parsedVectorAddFixed = true by native_decide;
+     rewire symCheckTutorial_sound through the generic theorem.
+  5. THEN "any vector-add .ttir": wfCheck + the symbolic normalize-check together
+     certify it, all via native_decide, no user proofs.
+
+ALL existing per-op _step + faithfulness + WF1 + driver lemmas are REUSED (they're the
+well-formed-case cores). Nothing landed is wasted. The generic wrappers sit on top.
+═══════════════════════════════════════════════════════════════════════════════
+
+─── GENERIC APPROACH KEYSTONE VALIDATED (2026-06-29) ──────────────────────────
+Confirmed the generic fold's core assumption: ops are faithful across ALL
+type-correct operand combinations (not just the tutorial's specific ones).
+VALIDATED (0 errors, axiom stand-in for private bind_tensor_faithful):
+  - addi (tensor,tensor): already have (addi_tt_faithful)
+  - addi (scalar,tensor): faithful — both broadcast; proof mirrors tt w/o shape guard
+  - addi_step_generic tensor+tensor case routes through proven addi_step (0 errors)
+SYNC CHECK (symAdd vs concrete addi), all cases stay in sync:
+  (sc,sc)->scalar both; (sc,ten)/(ten,sc)->broadcast both; (ten,ten)->shape-guard both;
+  (_,none)/(none,_)->none both. So NO divergence => generic step provable TOTALLY
+  (no wfCheck precondition needed for type-correct cases; degenerate cases both none).
+
+FULL CASE MATRIX for the generic layer (the turnkey build, ~30-40 small proofs):
+  Per op, prove FaithfulWF preserved from ARBITRARY state, all operand combos:
+  - constant, get_program_id: no operands — already essentially generic (constant_step
+    etc. take no operand hyps). Just drop any unused hyps -> generic directly.
+  - make_range: no operands — generic directly.
+  - muli: (sc,sc)->scalar [have]; (sc,ten)/(ten,sc)/(ten,ten) via zipWith — CHECK each;
+    degenerate -> none.
+  - addi/addf: (sc,sc),(sc,ten)[validated],(ten,sc),(ten,ten)[have]; degenerate->none.
+  - splat: (scalar)->tensor [have]; (tensor/fscalar/none)-> CHECK (splat only wants scalar).
+  - addptr: (sc,ten)[have addptr_st]; (sc,sc)->scalar, (ten,ten)->guard, others; degenerate.
+  - load: (tensor addrs)[have via load helper]; (scalar)->scalar load, others; degenerate.
+  Then: generic per-op step lemmas (FaithfulWF arbitrary -> FaithfulWF), hypothesis-free.
+  Then: prefix_faithful_wf hstep discharges uniformly (match on instr.op, apply generic
+    step) -> generic prefix soundness for ANY kernel.
+  Then: terminal store (still needs hconcrete via native_decide per kernel — that part
+    IS legitimately per-kernel-decidable, fine).
+  Then: rewire; instantiate tutorial; generalize to any vector-add .ttir.
+
+STATUS: keystone (mixed-operand faithfulness + sync) VALIDATED. Remaining generic layer
+is ~30-40 SYSTEMATIC small proofs — low-risk, mechanical, best done fresh in bulk.
+Existing _step/faithfulness lemmas are the type-correct-case cores, all REUSED.
+─────────────────────────────────────────────────────────────────────────────
+
+─── IMPORTANT SOUNDNESS FINDING: generic step needs no-float precondition (2026-06-29) ──
+StatesFaithful (Soundness.lean) constrains ONLY three env cases:
+  concrete scalar -> symbolic scalar (hsc)
+  concrete tensor -> symbolic tensor (hten)
+  concrete none   -> symbolic none   (hnone)
+It says NOTHING about concrete fscalar/ftensor -> symbolic is UNCONSTRAINED there.
+
+CONSEQUENCE: the "generic step faithful for ALL operand cases" claim is FALSE when
+operands are FLOAT-typed. E.g. concrete muli on (fscalar, _) = none (zipWith |_,_),
+but if symbolic ss.env a happens to be scalar, symbolic muli could = some => DIVERGENCE
+=> FaithfulWF NOT preserved. StatesFaithful doesn't rule this out.
+
+RESOLUTION (clean, correct): generic step lemmas need precondition "operands are not
+float-typed" (concrete not fscalar/ftensor). This is:
+  - DECIDABLE (check env value constructors) -> wf-checker verifies per kernel via
+    native_decide, ZERO user proof. Fits the generic-fold-with-decidable-checker plan.
+  - ALWAYS TRUE for integer vector-add kernels (no floats). So no real restriction.
+The wf-checker's job: verify each op's operands are present + non-float + right arity.
+Given that, generic steps are provable (scalar/tensor/none cases all constrained by
+StatesFaithful; float excluded).
+
+So the generic step contract is:
+  op_step_generic (instr) (h_op) (hwf_operands : operands non-float, from wf-checker)
+    (h : FaithfulWF s ss mem) : FaithfulWF (evalInstr ..) (symEvalInstr ..) mem
+For the tutorial: all operands are scalar/tensor (integer) -> precondition trivially true.
+
+VALIDATED so far this session:
+  - both_none_preserves_faithfulWF LANDED (degenerate = both-none -> identity, faithful)
+  - zip_mul_getD validated (muli tensor+tensor helper)
+  - muli/symbolic-muli SYNC confirmed (both: scalar/scalar, tensor/tensor-guard, else none)
+  - degenerate none-proofs are cheap (simp only [op, lookups])
+  - generic wrapper skeleton (cases + first-combinator + both_none) typechecks
+
+NEXT: define the non-float operand predicate + decidable wf-check; build generic steps
+with it; then generic fold. (The float finding REFINES but doesn't block the plan.)
+Alternatively (simpler for NOW): since StatesFaithful+float is the only gap, could ADD
+an 8th StatesFaithful conjunct "concrete env has no fscalar/ftensor" (integer-only
+invariant) — then generic steps need no per-op precondition. Consider next session.
+─────────────────────────────────────────────────────────────────────────────
+
+═══ NoFloat invariant LANDED; generic layer foundation complete (2026-06-29) ═══
+LANDED green (module build, sorry 4):
+  - both_none_preserves_faithfulWF (degenerate operand cases -> both identity -> faithful)
+  - NoFloatState + NoFloatState_bind_scalar/tensor (env has no fscalar/ftensor)
+  - zip_mul_getD (muli tensor+tensor helper, mirrors zip_add_getD)
+VALIDATED not-yet-landed:
+  - parsedInitState_NoFloat (init satisfies NoFloat; land in CHECKER.lean — needs
+    parsedInitState in scope. Proof: intro; simp only [parsedInitState] at hv;
+    split at hv <;> (first | (exfalso; exact Option.noConfusion hv)
+                            | (left; injection hv with hv; exact ⟨_, hv.symm⟩)))
+  - addi (scalar,tensor) mixed-case faithful (broadcast; proof in journal above)
+  - generic-wrapper skeleton (cases va vb <;> first | real | both_none) typechecks
+
+KEY PAYOFF: NoFloat eliminates fscalar/ftensor operand cases as VACUOUS. So generic
+step case-split on (s.env a, s.env b) is only {none,scalar,tensor}² minus float = ~9
+cases (not 25), all with symbolic lookups derivable from hsc/hten.
+
+CONSTRUCTION PLAN for generic layer (turnkey):
+  1. FaithfulWFI s ss mem := FaithfulWF s ss mem ∧ NoFloatState s
+  2. prefix_faithful_wfi (fold, mirror prefix_faithful_wf) +
+     kernel_faithful_wfi_terminal_store (capstone, mirror existing)
+  3. Per-op generic step: op_step_generic (instr)(h_op)(h : FaithfulWFI) : FaithfulWFI(...)
+     Structure (validated skeleton):
+       obtain FaithfulWF parts + NoFloat; cases s.env a, s.env b (float cases: exfalso
+       via NoFloat); route real cases through existing _step lemmas (need to derive their
+       operand-lookup hyps from the cases — h_la := hea etc); degenerate -> both_none
+       (concrete none via simp only [evalOp,lookups,zipWith/etc]; symbolic none via simp
+       only [symEvalOp, symbolic-lookups from hsc/hten]); preserve NoFloat via bind lemmas.
+     Ops needing generic wrappers: muli, splat, addi, addf, addptr, load.
+     (constant/get_program_id/make_range already generic — no operand hyps. Just need
+      FaithfulWFI versions that also thread NoFloat via NoFloatState_bind_scalar/tensor.)
+  4. Generic fold soundness: FaithfulWFI init + all-ops-generic-step -> prefix FaithfulWFI
+     -> (terminal store, hconcrete via native_decide) -> StatesFaithful. ANY integer kernel.
+  5. Rewire symCheckTutorial_sound through it; tutorial's FaithfulWFI init from
+     initFaithfulWF_tutorial + parsedInitState_NoFloat.
+  6. Then "any vector-add .ttir": FaithfulWFI init generalized + wf-check (native_decide).
+
+Each generic step ~9 cases. 6 ops. Substantial but mechanical, all mechanisms proven.
+VERIFY each with module build.
+═══════════════════════════════════════════════════════════════════════════════
+
+─── GENERIC LAYER: infrastructure + muli faithfulness LANDED (2026-06-29) ─────
+LANDED green (module build, sorry 4):
+  - FaithfulWFI (:= FaithfulWF ∧ NoFloatState) + prefix_faithful_wfi (fold) +
+    kernel_faithful_wfi_terminal_store (capstone). Mirror FaithfulWF stack exactly.
+  - zip_mul_getD (landed; was validated-only before)
+  - muli_tt_faithful (tensor×tensor muli faithful, via zipWith + zip_mul_getD;
+    mirrors addi_tt_faithful; in Section 5, uses private bind_tensor_faithful)
+
+REMAINING generic-step construction (turnkey, ~15-20 proofs):
+  Per op needing a generic wrapper (muli, splat, addi, addf, addptr, load):
+    (a) if elementwise: a _tt_step lifting _tt_faithful to FaithfulWF + output WF1
+        (mirror addi_step). muli needs muli_tt_step. addf has addf_tt_faithful already
+        but may need addf via addf_step (have addf_step). 
+    (b) the generic wrapper op_step_generic (instr)(h_op)(h : FaithfulWFI) : FaithfulWFI:
+        - obtain ⟨⟨faithfulWF⟩, nofloat⟩; case s.env a, s.env b
+        - float cases (fscalar/ftensor): exfalso via nofloat (NoFloatState v tv gives
+          scalar∨tensor, contradiction)
+        - real cases: route through existing _step lemma (derive its operand hyps h_la
+          := the case hypothesis hea, etc.); then re-establish NoFloat via
+          NoFloatState_bind_scalar/tensor
+        - degenerate (mixed scalar/tensor for muli; shape-mismatch tensor/tensor;
+          none operands): both_none_preserves_faithfulWF (concrete none via
+          simp only [evalOp,...,zipWith]; symbolic none via simp only [symEvalOp,
+          symbolic-lookups-from-hsc/hten])
+  muli case map: (sc,sc)real, (ten,ten)real+shapeguard, (sc,ten)/(ten,sc)both-none,
+    (none,_)/(_,none)both-none, floats vacuous.
+  Then: constant/gpid/make_range need FaithfulWFI versions (already generic on operands,
+    just thread NoFloat via bind lemmas — trivial).
+  Then: generic fold soundness theorem for the tutorial: instantiate hstep by matching
+    instr.op and dispatching to the op_step_generic lemmas; supply FaithfulWFI init
+    (initFaithfulWF_tutorial + parsedInitState_NoFloat — LAND parsedInitState_NoFloat in
+    Checker.lean, proof validated & in journal above); terminal store hstore (hconcrete
+    via native_decide cptrConcreteCheck). Then rewire symCheckTutorial_sound.
+
+Started muli_step_generic. Still need: muli_tt_step, the muli wrapper, then 5 more ops.
+VERIFY each with module build. Watch for double-runs (dup guard grep -c after landing).
+─────────────────────────────────────────────────────────────────────────────
+
+─── FIRST GENERIC STEP LANDED: muli_step_generic (2026-06-29, green, sorry 4) ──
+The template works end-to-end. muli_step_generic (FaithfulWFI arbitrary -> FaithfulWFI),
+~130 lines, all 9 cases:
+  (none,_)/(_,none): both_none + NoFloat-preserved-via-identity
+  (scalar,scalar): muli_scalar_step + NoFloatState_bind_scalar
+  (scalar,tensor)/(tensor,scalar): both_none (zipWith mixed=none) + identity
+  (tensor,tensor): muli_tt_step; shape-match -> NoFloatState_bind_tensor, mismatch -> identity
+  float cases (fscalar/ftensor): VACUOUS via NoFloat (rcases hnf gives only scalar/tensor)
+Supporting landed this session: muli_tt_faithful, muli_tt_step, zip_mul_getD, FaithfulWFI
+stack, both_none_preserves_faithfulWF, NoFloatState + bind lemmas.
+
+PROVEN PATTERN (template for remaining 5 ops):
+  obtain ⟨⟨⟨hsf,hraw⟩,hwf⟩, hnf⟩; obtain hsf parts;
+  cases hea : s.env a  (none | some va);  in some: rcases hnf a va hea -> scalar|tensor
+    (floats vacuous); nest cases heb : s.env b similarly.
+  Real cases: route through the op's _step lemma (deriving operand hyps from hea/heb);
+    re-establish NoFloat via bind lemmas (compute output value with simp only [...]).
+  Degenerate: both_none_preserves_faithfulWF with:
+    - concrete none: rw [h_op,h_args]; simp only [evalOp, MachineState.lookup, hea, heb,
+      Option.bind_some/none_bind/bind_none, <op-fn like zipWith>]
+    - symbolic none: derive symbolic lookups (obtain from hsc/hten), then
+      rw [h_op,h_args]; simp only [symEvalOp, SymState.lookup, <sym lookups>]
+    - then identity: unfold evalInstr; split (2 absurd store/storef) ; rw [show evalOp=none]
+  KEY tactic fixes learned:
+    - else-branch shape mismatch: simp only [...] THEN rw [if_neg hsh] (not if_neg in simp args)
+    - float cases handled FOR FREE by rcases hnf (NoFloat) giving only scalar/tensor disjuncts
+
+REMAINING generic steps (same template): splat, addi, addf, addptr, load.
+  - splat: 1 operand (scalar->tensor real; tensor/none/float -> degenerate/vacuous)
+  - addi/addf: like muli but symAdd not zipWith; have addi_step/addf_step + _tt_faithful.
+    Mixed (scalar,tensor) IS real for addi/addf (broadcast!) - NOT degenerate. Need
+    addi_st_step etc. OR route mixed through a broadcast faithfulness. RECHECK: addi
+    broadcasts (validated addi scalar,tensor faithful earlier), muli does NOT. So addi/addf
+    generic has MORE real cases (sc,sc),(sc,ten),(ten,sc),(ten,ten) all real.
+  - addptr: (scalar,tensor) real [addptr_st]; others degenerate.
+  - load: 1 tensor operand real [load_step]; scalar->scalar-load?, others.
+Then: FaithfulWFI versions of constant/gpid/make_range (thread NoFloat, trivial).
+Then generic fold instantiation + rewire.
+VERIFY each module build; dup-guard grep -c after each landing.
+─────────────────────────────────────────────────────────────────────────────
+
+═══ 2nd DIVERGENCE FOUND (generic layer): symbolic addptr shape gap (2026-06-29) ══
+symbolic addptr (Symbolic.lean) tensor,tensor arm: some (tensor n (bases i + offs i))
+  — NO shape guard, uses n from first operand, IGNORES second's shape.
+concrete addptr (Semantics.lean) tensor,tensor: if sh1==sh2 then some(zip+) else none.
+=> Mismatched-shape tensor pointers: concrete=none, symbolic=some. DIVERGENCE.
+=> addptr_step_generic is FALSE for the (tensor,tensor)-mismatched-shape case.
+Same class as the symAdd/symMul fidelity gap fixed earlier (symbolic ignored shape).
+WF1 does NOT save it: rank-1 tensors can still have different LENGTHS.
+
+Note: tutorial addptr is ALWAYS (scalar ptr, tensor idx) — never (tensor,tensor) —
+so the TUTORIAL is unaffected. Only the GENERIC step for arbitrary kernels hits this.
+
+RESOLUTION (deliberate, soundness-critical — DO NOT rush):
+  (a) length-guard symbolic addptr tensor,tensor arm (2nd trusted-model edit to
+      Symbolic.lean), mirroring the symAdd/symMul fix. Add `if m == n` guard.
+      CHECK against real Triton addptr semantics before editing (fidelity!).
+  This is a TRUSTED-MODEL edit — changes what symbolic means. Make it deliberately,
+  verifying it matches real Triton, NOT as a rushed end-of-session change.
+
+Generic steps landed so far (green, sorry 4): muli, constant, get_program_id,
+make_range, splat (5 of the needed set). Remaining: addptr (BLOCKED on this decision),
+load, addi, addf. addi/addf broadcast (mixed cases real).
+
+STATUS: this is the 2nd genuine soundness issue the careful process caught in the
+generic layer (float gap 1st). Both would have been unsound-but-compiling lemmas.
+─────────────────────────────────────────────────────────────────────────────
+
+─── GENERIC STEPS: 6 of 8 landed (2026-06-29, green, sorry 4) ─────────────────
+LANDED green this session (all module-verified):
+  Generic steps: muli_step_generic, constant_step_generic, get_program_id_step_generic,
+    make_range_step_generic, splat_step_generic, load_step_generic (TOTAL: scalar+tensor ptr)
+  Supporting: load_scalar_faithful (scalar-ptr load, bridges readMem=memory via hraw),
+    load_scalar_step (FaithfulWF for scalar load).
+  load sync confirmed: single-arg [p] load, concrete & symbolic both handle tensor->tensor,
+    scalar->scalar, none->none. (Masked [p,m] load: symbolic uses args.head? ignoring mask
+    => potential divergence, but tutorial uses plain [p]. load_step_generic scoped to [p].)
+
+REMAINING generic steps:
+  - addi_step_generic / addf_step_generic: BROADCAST ops. Mixed (scalar,tensor) and
+    (tensor,scalar) are REAL (not degenerate) — both concrete & symbolic broadcast.
+    So 4 real cases each: (sc,sc),(sc,ten),(ten,sc),(ten,ten). Have addi_step/addf_step
+    (tensor,tensor) + addi_tt_faithful/addf_tt_faithful. NEED broadcast step lemmas:
+    addi_ss (scalar,scalar), addi_st (scalar,tensor), addi_ts (tensor,scalar) — or route
+    through the inline evalOp arms. addi (scalar,tensor) faithfulness VALIDATED earlier
+    (journal above). Build addi_st_faithful/step, addi_ss, addi_ts, then wrapper.
+  - addptr_step_generic: BLOCKED on symbolic-addptr shape-divergence decision (2nd trusted-
+    model edit — length-guard symbolic addptr tensor,tensor arm; verify vs real Triton).
+    Tutorial addptr is (scalar,tensor) only, so tutorial-scoped addptr_step_generic COULD
+    be built handling (scalar,tensor) real + others degenerate, EXCEPT (tensor,tensor)
+    mismatch diverges. For a tutorial-only wrapper, could require... no, generic step must
+    be total. So addptr needs the model edit OR the wrapper restricted + wf-check excludes
+    tensor-tensor addptr. DEFER — deliberate decision.
+
+After addi/addf (+ addptr resolution): generic fold instantiation for tutorial:
+  match instr.op -> dispatch to *_step_generic; FaithfulWFI init (initFaithfulWF_tutorial +
+  parsedInitState_NoFloat [validated, land in Checker.lean]); terminal store via native_decide.
+  Then rewire symCheckTutorial_sound. Then generalize to any integer vector-add .ttir.
+─────────────────────────────────────────────────────────────────────────────
+
+─── GENERIC STEPS: 7 of 8 LANDED (2026-06-29, green, sorry 4) ─────────────────
+addi_step_generic + addf_step_generic LANDED (broadcast — all 4 operand combos real).
+Supporting landed: addi/addf _ss/_st/_ts _faithful (6) + _ss/_st/_ts _step (6).
+addf integer arms identical to addi; symbolic addf routes through symAdd like addi —
+so addf broadcast proofs are exact copies with .addf.
+
+ALL generic steps now landed EXCEPT addptr:
+  muli, constant, get_program_id, make_range, splat, load (total), addi, addf ✓
+  addptr — BLOCKED on symbolic-addptr shape-divergence (2nd trusted-model edit needed;
+    symbolic tensor,tensor arm lacks shape guard concrete has). DELIBERATE decision pending.
+
+REMAINING to complete tutorial via generic fold:
+  1. Resolve addptr (model edit OR scope). Tutorial addptr is (scalar,tensor) only.
+     For a TOTAL addptr_step_generic, the (tensor,tensor)-mismatch case diverges.
+     OPTION: build addptr_step_generic handling (scalar,scalar)/(scalar,tensor) real +
+     (tensor,tensor) NEEDS the symbolic shape-guard fix. Without fix, can't be total.
+     -> the model edit (length-guard symbolic addptr tensor,tensor) is the clean path.
+     Need addptr_ss_faithful/step (scalar,scalar) + addptr_st already have. Then wrapper.
+  2. parsedInitState_NoFloat -> land in Checker.lean (validated).
+  3. Generic fold instantiation: hstep matches instr.op -> dispatch to *_step_generic;
+     FaithfulWFI init; terminal store (native_decide hconcrete).
+  4. Rewire symCheckTutorial_sound through generic path. Re-verify RunCheck.lean.
+  5. Generalize to any integer vector-add .ttir.
+
+7/8 generic steps + full broadcast/faithfulness/step infrastructure landed this session.
+─────────────────────────────────────────────────────────────────────────────
+
+═══ addptr MODEL DECISION RESOLVED via real-Triton check (2026-06-29) ══════════
+Checked real Triton semantics (triton-lang docs + semantic.py) for addptr shape handling:
+  - Triton tensor ops require BROADCAST-COMPATIBLE shapes (equal, or one is 1);
+    incompatible mismatched shapes are a TYPE ERROR, not silently combined.
+  - tt.addptr = create_addptr(input, other) returns input.type; offset must be
+    broadcast-compatible with the pointer operand. Mismatched-incompatible shapes
+    never reach a well-typed addptr.
+CONCLUSION: our CONCRETE addptr (guards if sh1==sh2 -> else none) is FAITHFUL to real
+Triton (rejects mismatched shapes). The SYMBOLIC addptr (no shape guard, produces some
+for mismatched) is the BUG — it accepts what real Triton rejects.
+=> The trusted-model fix is JUSTIFIED and CORRECT: length-guard the symbolic addptr
+   tensor,tensor arm to match concrete. Makes symbolic MORE faithful to real Triton.
+   Same class as the symAdd/symMul fidelity fix.
+DECISION: make the edit. `if m == n then some(...) else none` on symbolic addptr t,t arm.
+═══════════════════════════════════════════════════════════════════════════════
+
+═══ ALL 8 GENERIC STEPS COMPLETE (2026-06-29, green, sorry 4) ═════════════════
+addptr_step_generic LANDED — the final generic step. Preceded by the addptr model fix:
+  - symbolic addptr tensor,tensor arm now shape-guarded (if n==m) matching concrete,
+    grounded in real Triton (mismatched shapes are a type error). Full rebuild green.
+  - addptr_ss_faithful/step (scalar,scalar), addptr_tt_faithful/step (tensor,tensor,
+    guarded) landed. (scalar,tensor) reuses existing addptr_step. (tensor,scalar) is
+    degenerate (addptr has no such arm -> both none).
+
+COMPLETE generic step set (all FaithfulWFI arbitrary -> FaithfulWFI, all module-verified):
+  muli, constant, get_program_id, make_range, splat, load (total), addi, addf, addptr.
+Every op the tutorial uses has a total generic step. THE GENERIC LAYER IS DONE.
+
+Two soundness gaps caught + fixed this arc: (1) float divergence -> NoFloat invariant;
+(2) addptr shape divergence -> symbolic shape-guard (real-Triton-grounded model fix).
+
+REMAINING to close the tutorial via generic fold:
+  1. Generic fold instantiation for tutorial (prefix_faithful_wfi hstep): match instr.op
+     -> dispatch to the *_step_generic lemma for that op. Supply FaithfulWFI init
+     (initFaithfulWF_tutorial + parsedInitState_NoFloat, both landed). Terminal store
+     hstore (native_decide hconcrete, cptrConcreteCheck pattern). Then
+     kernel_faithful_wfi_terminal_store gives StatesFaithful for the tutorial kernel.
+  2. Rewire symCheckTutorial_sound through the generic path (replace unsound-as-stated
+     symEval_sound). Re-verify RunCheck.lean (checker_pid0/1, parsedVectorAddFixed_correct).
+  3. Generalize to any integer vector-add .ttir (FaithfulWFI init generalized + wf-check).
+─────────────────────────────────────────────────────────────────────────────
+
+─── GENERIC FOLD ASSEMBLY: hstep dispatch VALIDATED (2026-06-29) ──────────────
+tutorial_prefix_hstep VALIDATED (0 errors): dispatches all 12 prefix instructions to
+their *_step_generic lemmas. KEY: fin_cases/List.take don't reduce cleanly; instead
+define explicit prefix list + unfold membership via
+  simp only [prefix, List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false] at hmem
+  rcases hmem with h|h|...|h <;> subst h   (12-way)
+then dispatch each: exact <op>_step_generic _ "arg1" "arg2" rfl rfl hf.
+Dispatch map (prefix order): constant 1024 / get_program_id / muli pid c1024_i32 /
+  make_range (some 1024) / splat 1024 offset / addi voffset range / addptr x_ptr idx /
+  addptr y_ptr idx / addptr output_ptr idx / load aptr / load bptr / addf a b.
+
+REMAINING assembly (3 pieces):
+  1. hstore: terminal store faithfulness from FaithfulWFI. Store instr =
+     {result:="_", op:=.store, args:=["cptr","c"]}. Need StatesFaithful of the post-store
+     states. Use store_tensor_faithful_when_memory_unchanged (7 hyps: h_lp/h_lv/hlen/hgp/
+     hgv_corr/hconcrete/haddr/hval). hconcrete via native_decide (cptrConcreteCheck pattern);
+     haddr/hval from StatesFaithful.hten of FaithfulWFI.
+  2. kernel split: parsedVectorAddFixed = testPrefix ++ [storeInstr]. Prove by rfl or decide.
+  3. Wire: kernel_faithful_wfi_terminal_store testPrefix storeInstr hstep hstore init ->
+     StatesFaithful (evalKernel ...) (symEvalKernel ...) mem. Extract .2.2.2.1 addr = the
+     memory fact that replaces symEval_sound in symCheckTutorial_sound.
+  Then rewire symCheckTutorial_sound: replace `symEval_sound K ...` with the generic result.
+
+LOCATION: assembly needs parsedVectorAddFixed (RunCheck.lean) OR define prefix/store in
+Checker.lean. hstep + split + hstore + rewire likely all in Checker.lean or a new file
+importing both. All *_step_generic + kernel_faithful_wfi_terminal_store already in Soundness.
+─────────────────────────────────────────────────────────────────────────────
+
+─── ASSEMBLY STRUCTURAL DECISION: bypass capstone hstore (2026-06-29) ─────────
+kernel_faithful_wfi_terminal_store's hstore hyp is UNIVERSAL (∀ s ss mem, FaithfulWFI ->
+store faithful). But store_tensor_faithful_when_memory_unchanged needs hconcrete (pointer
+addr exprs concrete) which is NOT true for arbitrary states — only for the SPECIFIC
+post-prefix symbolic state (where cptr's addr expr is a closed concrete term).
+=> DON'T call the capstone. Inline its body at the specific state (approach c):
+   1. rw [evalKernel_append, symEvalKernel_append]
+   2. hpre := prefix_faithful_wfi testPrefix tutorial_prefix_hstep init_FaithfulWFI
+      -> FaithfulWFI (evalKernel testPrefix init) (symEvalKernel testPrefix init) mem
+   3. simp only [evalKernel, symEvalKernel, List.foldl_cons, List.foldl_nil]  (peel the store)
+   4. prove store faithful AT hpre's state: apply store_tensor_faithful_when_memory_unchanged
+      - h_lp/h_lv: cptr, c are tensors at post-prefix state (from computing the prefix OR
+        from FaithfulWFI + the concrete eval). Need the concrete values of cptr/c bindings.
+      - hgp/hgv_corr/haddr/hval: from FaithfulWFI(hpre).hten applied to cptr and c
+      - hconcrete: native_decide on the CLOSED post-prefix symbolic cptr addr expr
+This matches the original 'one command' design: hconcrete IS the per-kernel native_decide.
+The capstone stays (useful if hstore ever universal); tutorial uses the inlined form.
+─────────────────────────────────────────────────────────────────────────────
+
+─── ASSEMBLY: backward bridge landed; store proof mapped (2026-06-29) ─────────
+LANDED green: faithful_tensor_backward (StatesFaithful + NoFloat + ss.env v = tensor
+  => ∃ concrete tensor at v). Reusable bridge to extract store operands from the
+  computable symbolic post-prefix state.
+VALIDATED: tKernel = tPrefix ++ [tStore] by rfl (clean split).
+VALIDATED: tutorial_prefix_hstep (12-way dispatch to generic steps).
+
+REMAINING store-faithfulness at post-prefix state (the intricate finish):
+  Structure (inline the capstone body at the specific state):
+    rw [evalKernel_append, symEvalKernel_append]
+    hpre := prefix_faithful_wfi tPrefix tutorial_prefix_hstep init_FaithfulWFI
+    simp only [evalKernel, symEvalKernel, List.foldl_cons, List.foldl_nil]  (peel store)
+    -- now prove store faithful at (evalKernel tPrefix init)/(symEvalKernel tPrefix init)
+    Extract cptr, c as concrete tensors via faithful_tensor_backward (need ss'.env cptr =
+      tensor, ss'.env c = tensor — computable on closed symbolic state).
+    Apply store_tensor_faithful_when_memory_unchanged (h_lp/h_lv/hlen/hgp/hgv_corr/
+      hconcrete/haddr/hval).
+
+KEY SUBTLETY (parametric concreteness): hconcrete (pointer exprs concrete) must hold for
+  the symbolic post-prefix state, whose init has pid/bs/n as VARIABLES. native_decide needs
+  CLOSED terms. So the assembled soundness theorem likely must be PER-CONCRETE-PID (like the
+  existing checker_pid0/checker_pid1 which native_decide at pid=0,1). I.e. the generic fold
+  gives StatesFaithful parametrically, but the terminal-store concreteness is discharged
+  per-pid via native_decide — matching the existing RunCheck.lean structure.
+  => The rewire target may be per-pid: prove the memory fact for pid=0, pid=1 via the generic
+     fold + native_decide store, replacing symEval_sound in those instances.
+
+ALTERNATIVELY: the existing symCheckTutorial_sound takes symCheckVectorAddTutorial K ...=true
+  as HYPOTHESIS (the native_decide check). That hypothesis ALREADY encodes the concreteness/
+  correctness the store needs. So the rewire could DERIVE hconcrete + the memory fact FROM
+  hcheck (the checker-returned-true hypothesis) rather than re-native_decide. This is cleaner:
+  symCheckTutorial_sound already has hcheck; use it to supply the store's concreteness.
+  -> INVESTIGATE: does symCheckVectorAddTutorial=true give enough to discharge the store
+     hconcrete + memory correspondence soundly via the generic fold?
+
+STATUS: generic layer 100% done (8/8 steps). Assembly: split+dispatch+backward-bridge done.
+Remaining: the store-faithful finish (parametric concreteness -> likely per-pid or derived
+from hcheck) + rewire symCheckTutorial_sound. This is the last intricate piece.
+─────────────────────────────────────────────────────────────────────────────
+
+─── hcheck FORK INVESTIGATED: RESOLVED to per-pid path (2026-06-29) ───────────
+Traced symCheckTutorial_sound's proof exactly. The chain:
+  hcheck (norm == spec) -> heval_eq: evalExpr(norm)(mem) = evalExpr(spec)(mem)
+  -> normalizeWithMem_correct: LHS = evalExpr(raw symbolic mem at addr)(mem)
+  -> vectorAddSpecExpr_correct: RHS = a[pid*bs+i] + b[pid*bs+i]
+  => heval_eq: evalExpr(symbolic mem at outputAddr)(mem) = a[i]+b[i]
+  Then symEval_sound: evalExpr(symbolic mem at addr)(mem) = concrete readMem addr
+  Combine: readMem addr = a[i]+b[i].  ∎
+
+FINDING: symEval_sound provides EXACTLY StatesFaithful.hmem (4th conjunct) at outputAddr.
+hcheck provides the symbolic VALUE correctness (norm==spec), NOT the store concreteness.
+=> hcheck does NOT shortcut the store proof. The generic fold must still produce the full
+   StatesFaithful (including the terminal store) to replace symEval_sound's hmem conclusion.
+=> The store's hconcrete must come from native_decide, which needs CLOSED terms => PER-PID.
+
+DECISION: the rewire is per-concrete-pid (matching checker_pid0/checker_pid1 in RunCheck).
+  For each concrete pid: generic fold (prefix) + store-at-post-prefix (hconcrete via
+  native_decide on the now-CLOSED symbolic state) -> StatesFaithful -> .2.2.2.1 addr
+  replaces symEval_sound. The parametric-pid symCheckTutorial_sound can keep symEval_sound
+  ONLY if we prove symEvalKernel_faithful soundly for the tutorial kernel class; otherwise
+  the honest sound result is per-pid.
+
+CLEANEST REWIRE: make a tutorial-specific sound memory lemma
+  symEvalTutorial_mem_sound (pid concrete) : evalExpr((symEvalKernel tKernel init).memory
+    outputAddr) mem = (evalKernel tKernel init).memory outputAddr
+  via the generic fold + native_decide store, then use it in place of symEval_sound in a
+  per-pid symCheckTutorial_sound (or in checker_pid0/pid1 directly in RunCheck.lean).
+
+So next: build the store-at-post-prefix for CONCRETE pid (native_decide-able), producing
+StatesFaithful of tKernel; extract hmem; slot into the per-pid soundness. All generic-layer
+pieces (8 steps, fold, dispatch, backward bridge) are ready to feed this.
+─────────────────────────────────────────────────────────────────────────────
+
+─── PER-PID STORE: all mechanisms validated (2026-06-29) ──────────────────────
+Confirmed via #eval + native_decide at pid=0 (init = symVectorAddTutorialInitState 0 1024 1 1024):
+  - cptr IS tensor length 1024; c IS tensor length 1024 (both #eval-confirmed)
+  - cptr addresses = 2048+i (output region 2*n+i, n=1024) — correct
+  - ALL cptr address exprs CONCRETE — native_decide confirms cptrConcreteCheck = true
+  - native_decide pattern: define top-level `def cptrConcreteCheck : Bool := match ...`,
+    then `example : cptrConcreteCheck = true := by native_decide`. (Inline match-Prop is
+    NOT Decidable; must wrap as Bool def then assert = true.)
+  - cptr is-some: native_decide on `.env "cptr" |>.isSome = true` works.
+
+ALL mechanisms for per-pid store proof now VALIDATED and ready:
+  ✓ faithful_tensor_backward (landed): ss'.env v = tensor -> ∃ concrete tensor (via NoFloat)
+  ✓ store_tensor_faithful_when_memory_unchanged (exists): the store helper, 7+ hyps
+  ✓ native_decide: cptr/c tensor bindings + concreteness (closed at concrete pid)
+  ✓ prefix_faithful_wfi + tutorial_prefix_hstep: FaithfulWFI at post-prefix state
+  ✓ evalKernel_append/symEvalKernel_append + tKernel = tPrefix ++ [tStore] (rfl)
+  ✓ hten (from FaithfulWFI post-prefix): supplies haddr/hval correspondence
+
+FINAL ASSEMBLY (turnkey — the last intricate proof):
+  per-pid lemma (concrete pid, e.g. 0): StatesFaithful (evalKernel tKernel init0)
+    (symEvalKernel tKernel init0) mem   [init0 = parsedInitState a b 0 1024 gs, mem=concreteMem a b]
+  1. rw [evalKernel_append, symEvalKernel_append]; peel store via simp foldl
+  2. hpre := prefix_faithful_wfi tPrefix tutorial_prefix_hstep init0 (init FaithfulWFI)
+  3. obtain StatesFaithful s' ss' mem + NoFloat s' from hpre
+  4. get ss'.env cptr = tensor _ gp, ss'.env c = tensor _ gv via native_decide (as Bool-def
+     + the actual value; match on the closed .env "cptr")
+  5. faithful_tensor_backward -> s'.env cptr = tensor sh addrs, s'.env c = tensor sh' vals
+  6. hten (from StatesFaithful s') applied to cptr/c: gives g with evalExpr(g i)=addrs[i];
+     UNIFY g with gp via injection (ss'.env cptr = tensor _ gp = tensor _ g -> gp=g)
+  7. apply store_tensor_faithful_when_memory_unchanged with all hyps; hconcrete via
+     cptrConcreteCheck native_decide.
+  KEY GOTCHA: match native_decide's gp to hten's existential g by injection on the single
+  definite ss'.env cptr value. And addrs.length = vals.length (both 1024) via WF1/backward.
+  Then: this StatesFaithful.2.2.2.1 outputAddr replaces symEval_sound in a per-pid
+  symCheckTutorial_sound (or directly in RunCheck checker_pid0/pid1).
+
+STATUS: generic layer 100%; assembly mechanisms 100% validated. Remaining = wire the one
+per-pid store proof (all pieces ready) + rewire. This IS the finish line.
+─────────────────────────────────────────────────────────────────────────────
+
+─── PER-PID STORE: foundation wired, structure confirmed (2026-06-29) ─────────
+VALIDATED (compiles): the FaithfulWFI-post-prefix foundation for the per-pid store proof:
+  have hinitwf := initFaithfulWF_tutorial a b 0 1024 gs
+    : FaithfulWF (parsedInitState a b 0 1024 gs)
+                 (symVectorAddTutorialInitState 0 1024 gs a.length) (concreteMem a b)
+  have hinitnf := parsedInitState_NoFloat a b 0 1024 gs
+  have hinit : FaithfulWFI ... := ⟨hinitwf, hinitnf⟩
+  have hpre := prefix_faithful_wfi tPrefix tutorial_prefix_hstep _ _ _ hinit
+    : FaithfulWFI (evalKernel tPrefix init_c) (symEvalKernel tPrefix init_s) (concreteMem a b)
+  KEEP init in initFaithfulWF_tutorial's EXACT form (symVectorAddTutorialInitState 0 1024
+  gs a.length) — do NOT force to 1 1024, causes mismatch.
+
+CONFIRMED: native_decide on symbolic cptr binding REQUIRES concrete gs (gs-variable fails,
+gs=1 passes). So per-pid lemma fixes BOTH pid AND gs concrete (e.g. pid=0, gs=1), matching
+existing checker_pid0/checker_pid1 (which use gs=1). Also need a.length=1024 (rw via hla
+before native_decide, OR stmt with 1024 literal + carry hla).
+
+TURNKEY FINISH (one focused sitting):
+  Lemma per (pid,gs) concrete, e.g. (0,1): given hla:a.length=1024, hlb:b.length=1024:
+    StatesFaithful (evalKernel tKernel (parsedInitState a b 0 1024 1))
+                   (symEvalKernel tKernel (symVectorAddTutorialInitState 0 1024 1 1024))
+                   (concreteMem a b)
+  Proof:
+    rw [show tKernel = tPrefix ++ [tStore] from rfl, evalKernel_append, symEvalKernel_append]
+    hpre := (foundation above, gs=1)
+    simp only [evalKernel, symEvalKernel, List.foldl_cons, List.foldl_nil]  -- peel store
+    obtain ⟨⟨⟨hsf,hraw⟩,hwf⟩, hnf⟩ from hpre  (post-prefix FaithfulWFI parts)
+    -- native_decide: ss'.env "cptr" = some (tensor 1024 gp0) for the SPECIFIC gp0, and
+    --   ss'.env "c" = some (tensor 1024 gv0). Get these as `have ... := by native_decide`
+    --   (may need to phrase as the whole env value equality, or is-some + then destructure).
+    -- faithful_tensor_backward hsf hnf "cptr" 1024 gp0 (nd) -> s'.env cptr = tensor sh addrs
+    --   similarly "c". hten (from hsf) "cptr" -> unifies g with gp0 by injection.
+    -- hlen: addrs.length=vals.length=1024 (WF1 from hwf + backward). hconcrete: cptrConcreteCheck
+    --   native_decide. haddr/hval: from hten's correspondence.
+    apply store_tensor_faithful_when_memory_unchanged (all 7+ hyps).
+  Then extract .2.2.2.1 outputAddr = the memory fact; use in per-pid symCheckTutorial_sound
+  or directly in RunCheck checker_pid0/pid1 (replacing symEval_sound).
+  GOTCHAS: (1) native_decide needs concrete gs + a.length=1024 substituted into the sym state
+  FIRST. (2) unify native_decide's gp0 with hten's existential g by injection on the definite
+  ss'.env cptr value. (3) MachineState.lookup = env definitionally for the store helper's h_lp.
+
+STATUS: generic layer 100%; assembly foundation validated; finish is ONE turnkey store proof
++ rewire, all mechanisms proven. Best done fresh in one focused sitting (7-hyp wiring).
+─────────────────────────────────────────────────────────────────────────────
+
+─── STORE WIRING: symbolic-binding extraction (in progress, 2026-06-29) ───────
+Building the per-pid store proof. First sub-piece: extract ss0.env "cptr" as
+∃ gp, = some (tensor 1024 gp), where ss0 := symEvalKernel tPrefix (symVAInit 0 1024 1 1024).
+VALIDATED facts (native_decide, all pass): cptr & c bind to tensor length 1024;
+  cptrConcreteCheck = true; is-some = true.
+IN PROGRESS: the rcases extraction. The `match ... with` tactic form FAILS (pattern err).
+  `rcases hc : ss0.env "cptr" with _ | ⟨x⟩ | ⟨sh,xs⟩ | ⟨y⟩ | ⟨fsh,fxs⟩` — the constructor
+  pattern arity is MISALIGNED for Option (SymValue) (5 errors). SymValue has 4 constructors
+  (scalar/tensor/fscalar/ftensor), wrapped in Option. Correct rcases likely:
+    rcases hc : ss0.env "cptr" with _ | v; then rcases v with x | sh xs | y | fsh fxs
+  OR use `Option.rec` / match on the some-value separately. NEED: get the tensor case with
+  named gp + a proof sh=1024 (by_cases sh=1024; subst; ⟨xs,rfl⟩; else native_decide absurd hc).
+  NEXT ATTEMPT: two-stage rcases (Option first, then SymValue), or:
+    obtain ⟨v, hv⟩ : ∃ v, ss0.env "cptr" = some v := by native_decide-backed
+    then cases v, close non-tensor + wrong-length via native_decide on hv.
+
+The rest of the store proof (after extraction) — UNCHANGED from prior turnkey recipe:
+  same for "c" (gv); faithful_tensor_backward -> concrete tensors; hten unify g=gp by
+  injection; hlen=1024; hconcrete=cptrConcreteCheck native_decide; apply
+  store_tensor_faithful_when_memory_unchanged; extract .2.2.2.1 outputAddr; rewire.
+
+ALL uncertainty resolved; this is pure tactic-wiring. Do the extraction with the two-stage
+rcases (Option then SymValue) FRESH — the one-stage 5-pattern rcases misaligns.
+─────────────────────────────────────────────────────────────────────────────
+
+─── STORE OPERAND EXTRACTION COMPLETE (2026-06-29, green) ─────────────────────
+BLOCKER RESOLVED: extract_tensor landed. Root cause of the 7 failed attempts: SymValue has
+ONLY 2 constructors (scalar | tensor) — NOT 4 (no fscalar/ftensor; those are TritonValue only).
+Correct form: structured `cases hc : ss.env name with | none => ... | some v => cases v with
+| scalar x => ... | tensor n g => ...` (NOT bullet rcases). Fresh-start constructor check found
+it in one look.
+
+FULL operand extraction VALIDATED (store15.lean, 0 errors):
+  hinit (rw hla into initFaithfulWF_tutorial UP FRONT so symbolic init is closed 1024)
+  hpre := prefix_faithful_wfi tPrefix tutorial_prefix_hstep ... (FaithfulWFI post-prefix)
+  obtain ⟨⟨⟨hsf, hraw⟩, hwf⟩, hnf⟩ := hpre   (correct 4-deep FaithfulWFI nesting)
+  extract_tensor (EXPLICIT symbolic state, NOT _; metavar breaks native_decide) "cptr" 1024
+    -> gp, hcptr_sym : ss'.env cptr = some (tensor 1024 gp)
+  faithful_tensor_backward hsf hnf "cptr" 1024 gp hcptr_sym
+    -> shp, addrs, hcptr_con : s'.env cptr = some (tensor shp addrs)
+  same for "c" -> gv, hc_sym, shc, vals, hc_con.
+
+NOW HAVE at post-prefix state: hsf, hraw, hwf, hnf, hcptr_sym, hcptr_con, hc_sym, hc_con.
+REMAINING (final wiring): apply store_tensor_faithful_when_memory_unchanged. Need:
+  h_lp : s'.lookup cptr = tensor sh addrs   (= hcptr_con; lookup = env definitionally)
+  h_lv : s'.lookup c = tensor sh vals        (= hc_con; NOTE: sh must MATCH between cptr & c!)
+    -> both shp, shc must be [1024] (WF1). Get from hwf: WFState gives tensor shape = [len].
+  hlen : addrs.length = vals.length          (both 1024; from WF1 hwf on each)
+  hgp : ss'.env cptr = tensor addrs.length gp    <- hcptr_sym + addrs.length=1024
+  hgv_corr : ss'.env c = tensor vals.length gv   <- hc_sym + vals.length=1024
+  hconcrete : gp i concrete (i<addrs.length) <- native_decide (cptrConcreteCheck=true validated)
+  haddr : evalExpr (gp i) mem = addrs.getD i <- from hsf.hten applied to cptr (unify g=gp by inj)
+  hval : evalExpr (gv i) mem = vals.getD i   <- from hsf.hten applied to c (unify g=gv by inj)
+Then store_...faithful gives StatesFaithful (evalInstr tStore s')(symEvalInstr tStore ss') mem.
+Combine with append decomposition -> StatesFaithful of full tKernel. Extract .2.2.2.1 outputAddr.
+GOTCHA: shp/shc = [1024] needed (store helper wants SAME sh for cptr & c). Derive via WF1.
+─────────────────────────────────────────────────────────────────────────────
+
+═══ STORE PROOF + FULL-KERNEL SOUNDNESS COMPLETE (2026-06-29, green, sorry 4) ══
+The entire per-pid store proof is DONE and landed, sorry-free:
+  - extract_tensor (Soundness): symbolic tensor binding from native_decide shape fact.
+    KEY: SymValue has 2 constructors (scalar|tensor) — the 7-attempt blocker. Use structured
+    `cases ... with | none | some v => cases v with | scalar | tensor`.
+  - cptrAllConcrete + cptr_concrete (Checker): hconcrete via List.all native_decide +
+    List.all_eq_true. (Bool-valued def; Prop-match is NOT Decidable.)
+  - store_faithful_at_postprefix (Checker): the full 7+-hyp apply of
+    store_tensor_faithful_when_memory_unchanged. Wiring: extract cptr/c symbolic (explicit
+    state to extract_tensor, metavar breaks native_decide); faithful_tensor_backward -> concrete;
+    hten + injection to unify g=gp AND get length=1024; WF1 -> shp=shc=[1024] (subst);
+    haddr/hval from hten correspondence; hconcrete from cptr_concrete.
+  - tutorial_kernel_faithful (Checker): rw append lemmas, peel store via foldl simp, apply
+    store_faithful_at_postprefix -> StatesFaithful of tPrefix ++ [tStore].
+  - tutorial_mem_sound (Checker): .2.2.2.1 addr -> the SOUND memory fact replacing symEval_sound.
+
+ALL GREEN. sorry steady at 4 (all pre-existing, unrelated to this chain). The generic-fold
+soundness for the tutorial kernel is COMPLETE and SOUND — no reliance on unsound symEvalKernel_faithful.
+
+REMAINING: rewire. Point parsedVectorAddFixed_correct / checker_pid0 / checker_pid1 (RunCheck)
+or symCheckTutorial_sound (Checker) at tutorial_mem_sound instead of symEval_sound. Then the
+per-pid (pid=0,gs=1) soundness is end-to-end sound. Note: tutorial_mem_sound is for the inlined
+tKernel (tPrefix++[tStore]) at pid=0,gs=1,n=1024; connect to parsedVectorAddFixed via the
+rfl-split tKernel = parsedVectorAddFixed (already validated by rfl).
+═══════════════════════════════════════════════════════════════════════════════
+
+═══ STORE PROOF + FULL-KERNEL SOUNDNESS COMPLETE (2026-06-29, green, sorry 4) ══
+Per-pid store proof DONE and landed sorry-free: extract_tensor (Soundness; KEY: SymValue has
+2 constructors not 4 — the 7-attempt blocker; use structured cases none/some then scalar/tensor),
+cptrAllConcrete+cptr_concrete (Checker; List.all native_decide), store_faithful_at_postprefix
+(Checker; full 7+-hyp store apply), tutorial_kernel_faithful + tutorial_mem_sound (Checker;
+the SOUND memory fact replacing symEval_sound). ALL GREEN, sorry steady at 4.
+REMAINING: rewire parsedVectorAddFixed_correct/checker_pid0/pid1 or symCheckTutorial_sound at
+tutorial_mem_sound. tKernel = parsedVectorAddFixed by rfl. pid=0,gs=1,n=1024.
+═══════════════════════════════════════════════════════════════════════════════
+
+═══════════════════════════════════════════════════════════════════════════════
+  ★★★ GENERIC-FOLD SOUNDNESS COMPLETE — END TO END, SOUND ★★★  (2026-06-29)
+═══════════════════════════════════════════════════════════════════════════════
+The tutorial vector-add kernel is now proven correct via the GENERIC FOLD, with NO reliance
+on the unsound-as-stated symEval_sound / symEvalKernel_faithful. Full sound chain (all green,
+sorry steady at 4 — all 4 pre-existing & unrelated):
+
+  tutorial_sound_pid0 / tutorial_sound_pid1  (concrete, n=2048, bs=1024, both program instances)
+    -> tutorial_correct_sound (pid n parametric; hcheck + normalizeWithMem_correct +
+         vectorAddSpecExpr_correct + tutorial_mem_sound_param)
+    -> tutorial_mem_sound_param  (.2.2.2.1 addr — the SOUND memory fact)
+    -> tutorial_kernel_faithful_param  (append decomp + store peel)
+    -> store_faithful_at_postprefix_param  (full 7+-hyp store apply)
+       + prefix_faithful_wfi  (the FOLD over all 8 generic step lemmas)
+    facts discharged per-pid by native_decide (hcptr_fact, hc_fact, cptrAllConcreteAt).
+
+WHAT THIS MEANS: soundness now flows through the verified generic layer:
+  - per-op generic step lemmas (8/8: constant, gpid, muli, make_range, splat, addi, addf,
+    addptr, load) each preserving FaithfulWFI from ARBITRARY state;
+  - the fold prefix_faithful_wfi chaining them with ZERO per-op work;
+  - the terminal store via store_tensor_faithful_when_memory_unchanged;
+  - both soundness gaps caught & fixed (float -> NoFloat invariant; addptr shape -> guarded,
+    real-Triton-grounded);
+  - concreteness discharged per concrete pid by native_decide (matches checker_pid0/1 design).
+
+The architecture generalizes: ANY integer .ttir gets soundness from the same generic fold +
+per-kernel native_decide, with no new proof. The tutorial is the worked instance.
+
+KEY LEMMAS LANDED THIS SESSION (all green):
+  Soundness.lean: extract_tensor, faithful_tensor_backward, addptr_ss/tt_faithful+step,
+    addptr_step_generic (8th generic step), + earlier generic layer.
+  Checker.lean: tPrefix, tStore, tutorial_prefix_hstep, cptrAllConcreteAt, cptr_concrete_at,
+    store_faithful_at_postprefix_param, tutorial_kernel_faithful_param, tutorial_mem_sound_param,
+    tutorial_correct_sound, tutorial_sound_pid0, tutorial_sound_pid1.
+
+REMAINING (future, optional): (1) point RunCheck's parsedVectorAddFixed_correct at
+tutorial_sound_pid0/pid1 (cosmetic — the sound proof exists; the rfl-split tKernel =
+parsedVectorAddFixed connects them). (2) retire symEval_sound / symEvalKernel_faithful entirely.
+(3) generalize the per-kernel wrapper to arbitrary integer .ttir (the generic layer already
+supports it; just needs the init + wf-check glue).
+═══════════════════════════════════════════════════════════════════════════════
+
+═══ MASKED LOAD/STORE SOUNDNESS FIX — model level COMPLETE (Steps A-D) ════════
+Found + fixed a live soundness DIVERGENCE: symbolic load/store silently ignored masks
+while concrete respected them (the real vector_add_tutorial.ttir uses masking on n_elements).
+Same class as the addptr/float gaps. Investigated real Triton: masked-out load = 0/other,
+masked-out store = skip. CONCRETE was correct; SYMBOLIC was the bug.
+
+DECISION (foundation for "verify any .ttir for all inputs"): symbolic mirrors concrete
+STRUCTURALLY, not via total-write tricks — keeps symbolic state clean (no nested .select in
+memory), keeps per-op symbolic≡concrete lockstep that makes the generic layer generalizable.
+
+Step A: added Expr.select (cond then else) constructor. Threaded through: inductive, Expr.beq,
+  exprBeqEq_aux injection (+14 mismatch cases), exprBeqRefl_aux — in BOTH Symbolic.lean AND
+  Checker.lean (which duplicates these mutual blocks: exprBeqEq, exprBeqRefl).
+Step B: evalExpr (.select c t e => if evalExpr c != 0 then t else e — matches concrete's !=0
+  exactly) + normalizeExpr (static-resolve when cond normalizes to lit) + normalizeExpr_correct
+  (all nested cases blocks got .select arms + top-level .select case).
+Step C: Expr.isConcrete (.select = all 3 children concrete) + evalExpr_concrete .select case.
+Step D: symbolic .load — [ptr] unmasked / [ptr,mask] -> .select (masks i)(load addr)(lit 0) /
+  [ptr,mask,other] -> .select (masks i)(load addr)(others i). Mirrors concrete's if mk!=0.
+  symbolic .store — [p,v] unmasked / [p,v,m] -> filter mask-true indices then writeMem
+  (mirrors concrete filterMap). Mask evaluated vs zero-mem (fun _=>0), same convention as addrs.
+
+ALL GREEN: Soundness + Checker force-recompiled clean, sorry steady 4/4, RunCheck clean.
+tutorial_sound_pid0/pid1 UNAFFECTED (they use the preserved unmasked [ptr]/[p,v] cases).
+Pre-existing orphaned breakage noted: MatmulProof.lean (make_range sig change, not in main lib,
+6 errors, out of scope). ReductionProof/ReLUProof build clean.
+
+NEXT — Step E (the proof work): generic step lemmas for masked load/store + cmpi_slt + andi,
+so the generic FaithfulWFI fold can actually VERIFY masked kernels. Then Step F: wire parser,
+verify against real vector_add_tutorial.ttir. The store proof needs a NEW partial-write lemma
+(existing store_tensor_faithful_when_memory_unchanged assumes all-n writes; masked store is
+partial). cmpi_slt/andi need symbolic step lemmas too (mask construction).
+═══════════════════════════════════════════════════════════════════════════════
+
+═══ THIRD DIVERGENCE FOUND + FIXED: cmpi_slt hardcoded mask (Step E prereq) ═══
+CRITICAL find: symbolic cmpi_slt returned `fun _ => Expr.lit 1` with comment "assume in-bounds"
+— it HARDCODED the mask to always-true, i.e. assumed the exact property (in-bounds access) a
+verifier must PROVE. This neutralized the Step D masked-load/store fix entirely. Worst of the
+three divergences (float/addptr/mask) because it's "assume the conclusion." Concrete cmpi_slt
+correctly does `if x < y then 1 else 0`.
+
+FIX required a 2nd Expr constructor: Expr.lt (a b) — evalExpr = `if a<y then 1 else 0`. Threaded
+through all sites (same as .select): inductive/beq/injection(+16 mismatch)/refl in BOTH
+Symbolic.lean and Checker.lean; evalExpr; normalizeExpr (static-resolve both-lit); isConcrete +
+evalExpr_concrete; normalizeExpr_correct (all nested cases + top-level .lt case). Then rewired
+symbolic cmpi_slt: tensor -> `fun i => Expr.lt (xs i)(ys i)`, scalar -> `Expr.lt x y`.
+VERIFIED via #eval: Expr.lt gives 1/0/0 for 5<10, 10<5, 7<7 — matches concrete exactly.
+
+Also noted: symbolic `andi` does NOT exist (falls to `_ => none`) — compound masks (i<n & j<m)
+would fail to symeval. Not blocking the single-cmpi_slt vector_add_tutorial.ttir; defer to when
+a kernel needs it.
+
+ALL GREEN: Soundness+Checker force-recompiled, sorry 4/4, RunCheck clean. tutorial_sound_pid0/1
+still fine (unmasked path preserved).
+
+MODEL LAYER for masking now COMPLETE + HONEST. Remaining Step E = PROOF layer:
+  - cmpi_slt_step_generic (mask construction: tensor of Expr.lt, preserves FaithfulWFI)
+  - masked_load_step_generic (load with .select mask — value faithfulness needs concrete=symbolic
+    per element: concrete `if mk!=0 then readMem else 0` vs symbolic evalExpr(.select mask load 0))
+  - masked_store: NEW partial-write faithfulness lemma (concrete filterMap vs symbolic filter;
+    existing store_tensor_faithful assumes all-n writes — need a partial/filtered variant)
+Then Step F: parser wiring + verify real vector_add_tutorial.ttir.
+═══════════════════════════════════════════════════════════════════════════════
+
+═══ cmpi_slt: 4th divergence (zip-truncation) closed via shape guard ══════════
+Discovered while writing cmpi_slt_step_generic: the unguarded cmpi_slt had a LATENT
+truncation divergence — on mismatched operand lengths, concrete's zip truncates to min while
+symbolic used n. Every other binary op (addi/addf/muli) already guards shape and no-ops on
+mismatch. cmpi_slt not guarding was an inconsistency (masked while it was hardcoded to 1).
+
+DECISION (best foundation for "any .ttir, all inputs"): a verifier must be sound on ALL inputs
+it can be handed, not just well-typed ones. Added `if sha==shb` guard to BOTH concrete
+(Semantics.lean evalOp + the evalOp_cmpi_slt @[simp] restatement) and symbolic (Symbolic.lean,
+`if na==nb`). Mismatched -> none (no-op), matching addi/addf/muli. Now total+faithful everywhere,
+no carve-out, and cmpi_slt is structurally uniform with the other binary ops (key for generalizing).
+
+cmpi_slt_tt_faithful REWRITTEN to guarded form: now mirrors addi_tt_faithful EXACTLY (by_cases
+hlen shape branch, WF1 hyps instead of external hlen — the guard provides length equality
+internally). No hlen side-condition to discharge at call sites. zip_lt_getD helper landed.
+
+ALL GREEN: Semantics+Symbolic+Soundness+Checker, sorry 4/4, RunCheck clean.
+
+STEP E REMAINING: cmpi_slt_step_generic (now trivial — addi_step_generic template applies
+verbatim since cmpi_slt behaves exactly like addi). Then masked_load faithful+step, then the
+hard one: masked_store partial-write faithfulness (concrete filterMap vs symbolic filter).
+Then Step F: parser + real vector_add_tutorial.ttir.
+═══════════════════════════════════════════════════════════════════════════════
+
+═══ MASK CONSTRUCTION PROOF LAYER COMPLETE: cmpi_slt_step_generic (9th step) ══
+The generic fold now has a faithful, FaithfulWFI-preserving step lemma for cmpi_slt — mask
+construction is verified for ALL inputs. This is the 9th generic step (after constant, gpid,
+muli, make_range, splat, addi, addf, addptr, load).
+
+Landed (all green, sorry steady 4/4):
+  zip_lt_getD — helper: ((xs.zip ys).map (x<y?1:0)).getD i = (xs.getD i < ys.getD i ? 1 : 0)
+  cmpi_slt_tt_faithful — tensor,tensor value correspondence (guarded, mirrors addi_tt_faithful;
+    by_cases shape branch, WF1-derived length equality, no external hlen)
+  cmpi_slt_ss_faithful — scalar,scalar (full StatesFaithful 7-tuple, evalExpr .lt = if x<y)
+  cmpi_slt_tt_step / cmpi_slt_ss_step — WF-wrappers (FaithfulWF), placed AFTER FaithfulWF def
+    (line 1763) near addi_ss_step — NOT near the faithful lemmas (that was a placement bug:
+    FaithfulWF/WFState_bind_*/evalInstr_preserves_memory_of_ne_store all defined later).
+  cmpi_slt_step_generic — dispatches: none/absent operands -> noop closer (evalOp=none ->
+    both states unchanged); scalar-scalar -> cmpi_slt_ss_step (productive); tensor-tensor ->
+    cmpi_slt_tt_step (productive, THE mask case); shape-mismatch -> no-op via guard. Uses
+    rcases hnf (NoFloatState) to get scalar|tensor only, avoiding float cases. NO sorry.
+
+KEY PLACEMENT LESSON: *_step / *_step_generic lemmas must come AFTER FaithfulWF (1763) and the
+WFState/NoFloat/preserves-memory helpers. Only the pure *_faithful (StatesFaithful) lemmas can
+live early near addi_tt_faithful. Landing a _step lemma too early -> "Function expected at
+FaithfulWF" (identifier not yet in scope). Forced module recompile catches this; cached does not.
+
+REMAINING Step E: masked_load (faithful + step; .select per-element, concrete if mk!=0 vs
+symbolic evalExpr(.select mask load 0)), then masked_store (the hard one: partial-write
+faithfulness, concrete filterMap vs symbolic filter). Then Step F: parser + real .ttir.
+
+═══ MASKED LOAD faithfulness landed (core of Step E masked_load) ══════════════
+load_tensor_masked_faithful — the 2-arg [p,m] masked load per-element correspondence:
+  symbolic .select (gm i)(.load (gp i))(lit 0)  ≡  concrete if mk!=0 then readMem else 0.
+Proven via: evalExpr .select unfold (if evalExpr(mask)!=0), hgm/hgp (mask+addr correspondence),
+zip_mask_load_getD (new helper: getD of the masked zip-map), hmem_raw + readMem.
+Mirrors load_tensor_faithful_when_memory_unchanged + the .select/mask layer. All green, sorry 4/4.
+Supersedes the old load_tensor_masked_faithful_when_all_true (all-true-assuming, was sorry).
+
+REMAINING for masked_load: the WF-wrapper (load_masked_tensor_step, like load_step) + the
+step_generic dispatcher (like load_step_generic but 2-arg [p,m], productive only tensor-tensor
+for ptr+mask). Mechanical, follows load_step_generic template.
+
+STILL AHEAD: masked_store (the hard one — partial-write faithfulness, concrete filterMap vs
+symbolic filter; NOT a template adaptation, genuinely new memory reasoning). Then Step F: parser
++ real vector_add_tutorial.ttir end-to-end.
+
+SESSION TALLY (masking arc): 4 divergences closed (float/addptr/cmpi_slt-hardcode/cmpi_slt-trunc);
+2 Expr constructors added (.select, .lt) threaded through 3 files; masked load/store model rewired;
+cmpi_slt shape-guarded; cmpi_slt_step_generic (9th generic step) + 4 helpers; masked-load
+faithfulness. Sorry steady at 4 THROUGHOUT. Live chain (Soundness+Checker+RunCheck) green throughout.
+
+═══ MASKED LOAD complete end-to-end (10th generic step) ═══════════════════════
+load_masked_step_generic landed (all green, sorry 4/4). Masked-read verification now works:
+  load_tensor_masked_faithful (correspondence: .select mask load 0 ≡ if mk!=0 readMem else 0)
+  -> load_masked_step (FaithfulWF wrapper; extracts hmem_raw from hraw for the faithful lemma)
+  -> load_masked_step_generic (dispatcher; rcases hnf gives scalar|tensor, productive only when
+     BOTH p and m are tensors — the mask+ptr case; else no-op via the noop closer).
+Takes hlen_pre hypothesis (addr.length = mask.length when both tensors) — real Triton same-shape
+guarantee, caller-established. zip_mask_load_getD helper landed.
+
+GENERIC STEPS NOW: constant, gpid, muli, make_range, splat, addi, addf, addptr, load,
+cmpi_slt (mask build), load_masked (masked read) = 10 steps. The fold can verify a kernel that:
+builds offsets, splats a bound, builds a mask via cmpi_slt, addptrs, and does a MASKED load.
+
+REMAINING: masked_store (the hard one — partial-write faithfulness: concrete filterMap writes
+only mask-true addrs, symbolic filters identically; existing store_tensor_faithful assumes all-n
+writes, so this needs NEW partial-write memory reasoning). Then Step F: parser + real .ttir.
+
+═══ MASKED STORE: both hard pieces PROVEN (the genuinely novel reasoning) ═════
+The two structurally-hard lemmas that masked store needs — the reasoning I flagged all session
+as the real difficulty — are landed, green, sorry 4/4:
+
+1. masked_writeTile_eq_cond_fold (+ helpers writeTile_cons, cond_fold_succ):
+   CONCRETE bridge. Concrete masked store does writeTile over the FILTERED `kept` list
+   (filterMap keeps mask-true (addr,val)). This proves that ≡ a conditional fold over the FULL
+   range that skips masked-out indices. Reconciles filtered-writeTile vs conditional-range-fold
+   by induction; cond_fold_succ decomposes foldl over range(n+1) into head-write + range(n).
+
+2. masked_fold_mem_faithful_aux:
+   SYMBOLIC correspondence. Conditional analog of fold_mem_faithful_aux: symbolic conditional
+   fold (if evalExpr(mask)(zeromem)!=0 then writeMem) vs concrete conditional fold agree at every
+   address. Needs mask expressions CONCRETE (hMconc) so zero-mem eval = mem eval = concrete mask
+   value (hmask_zero, like haddr_zero). by_cases on the mask each step, recurse both branches.
+
+Together: concrete masked store --(bridge)--> concrete conditional fold --(faithful_aux)-->
+symbolic conditional fold = symbolic masked store. The memory agreement chain is complete.
+
+REMAINING for masked store (assembly, follows unmasked store_tensor_faithful template):
+  - public range wrapper for masked_fold_mem_faithful_aux (like range_fold_mem_faithful)
+  - store_tensor_masked_faithful (ties evalInstr/symEvalInstr masked store together via the
+    bridge + range wrapper; supersedes store_tensor_masked_faithful_when_all_true)
+  - store_masked step + step_generic (WF wrappers)
+Then Step F: parser + real vector_add_tutorial.ttir end-to-end.
+
+═══ MASKED STORE FAITHFULNESS COMPLETE — the hardest lemma, done ══════════════
+store_tensor_masked_faithful landed (all green, sorry 4/4). The full masked-store correspondence:
+  concrete evalInstr (filterMap-writeTile)
+    --[masked_writeTile_eq_cond_fold]--> concrete conditional fold over range
+    --[masked_range_fold_mem_faithful]--> symbolic conditional fold (memory agrees per-address)
+    = symbolic symEvalInstr masked store.
+  pid/bs/gs/env preserved via 8 conditional-fold projection helpers (sym/con × pid/bs/gs/env).
+  Requires gp (addr) AND gm (mask) expressions concrete (hAconc, hMconc) — the mask being
+  concrete is what lets the zero-mem eval in symbolic store match the true mask value.
+Supersedes store_tensor_masked_faithful_when_all_true (the old all-true-assuming sorry version).
+
+This was THE hard piece flagged all session — partial-write memory faithfulness reconciling
+concrete's filtered writeTile with symbolic's conditional range-fold. Done via two novel
+inductions (the bridge + the conditional fold_mem_faithful), both landed cleanly.
+
+REMAINING: store_masked step + step_generic (WF wrappers, mechanical — follow store_step /
+load_masked_step_generic templates). Then Step F: parser + real vector_add_tutorial.ttir.
+The full masked vector-add is now within reach: every op it uses (cmpi_slt mask build, masked
+load, masked store) has a faithful + generic-step lemma OR is about to (store wrappers).
+
+═══ STEP E COMPLETE: entire masking proof-layer done ══════════════════════════
+KEY REALIZATION: there is NO store_step_generic. Store is the TERMINAL instruction, called
+directly at the end of the kernel proof (Checker store_faithful_at_postprefix_param line 619
+calls store_tensor_faithful_when_memory_unchanged directly, after the generic fold handles the
+prefix). So masked store needs NO step wrapper — store_tensor_masked_faithful IS the complete
+terminal lemma, analogous to the unmasked one. Masked store is DONE.
+
+ENTIRE MASKING PROOF-LAYER (Step E) now complete:
+  - mask construction: cmpi_slt_step_generic (in the generic fold) ✓
+  - masked load:       load_masked_step_generic (in the generic fold) ✓
+  - masked store:      store_tensor_masked_faithful (terminal, called directly) ✓
+Every op the real masked vector_add_tutorial.ttir uses has faithfulness/soundness proven.
+sorry steady at 4 through the ENTIRE masking effort. Live chain green throughout.
+
+REMAINING: Step F only. Wire parser (Parser.lean is dead code, never called) OR hand-encode the
+REAL masked instruction list, then build end-to-end proof mirroring tutorial_correct_sound but
+for the masked kernel: masked prefix (offsets, splat bound, cmpi_slt mask, addptr, masked load,
+addf) folded via prefix_faithful_wfi + the new masked step lemmas, then terminal masked store via
+store_tensor_masked_faithful. Then per-pid native_decide instances like tutorial_sound_pid0/1.
+
+═══ MASKED LOAD refactored → uniformly dispatchable + latent divergence CLOSED ═
+Toward the "verify ANY .ttir, no new per-kernel proof" goal: load_masked_step_generic no longer
+takes hlen_pre. Discovered a LATENT DIVERGENCE doing this: concrete masked load [p,m] used
+addrs.zip masks (TRUNCATES to min length) while symbolic used full n = addrs.length — same bug
+shape as the cmpi_slt truncation. Fixed by SHAPE-GUARDING both sides (mismatch -> none), the
+project's consistent convention (addi/addf/muli/cmpi_slt all guard). Now:
+  - concrete masked load: if addrs.length == masks.length then ... else none
+  - symbolic masked load: if n == nm then ... else none
+  - load_masked_step_generic: internal by_cases on length; match -> productive, mismatch -> noop
+    on both guarded sides. NO hlen_pre parameter.
+Rippled through load_tensor_masked_faithful + load_masked_step (discharge guard via hlen). All
+green, sorry 4/4. Checker still clean (masked kernel not yet wired — that's Step F).
+
+ALL 10 GENERIC STEPS NOW UNIFORM SHAPE: (instr)(arg names)(h_op)(h_args)(h : FaithfulWFI) with
+no extra semantic side-conditions. This UNLOCKS the generic op-dispatcher: a single theorem
+matching instr.op/instr.args and calling the right *_step_generic — replacing the per-kernel
+hand-written tutorial_prefix_hstep FOREVER. That dispatcher + parser + fold = "any .ttir, no new
+proof". Building the dispatcher next.
+
+═══ GENERIC OP-DISPATCHER LANDED — core of "any .ttir, no per-kernel proof" ════
+generic_step + InstrSupported landed (green, sorry 4/4). InstrSupported = disjunction of the 10
+supported op+arg patterns; generic_step rcases it, dispatching each to its *_step_generic. Proven.
+Placement: must be AFTER all 10 *_step_generic (last addptr ~L3504); landed before
+faithful_tensor_backward. This REPLACES the per-kernel tutorial_prefix_hstep for ANY kernel.
+REMAINING: (1) DecidablePred InstrSupported, (2) kernel driver, (3) parser wiring, (4) top verify.
+
+═══ DECIDABLE DISPATCHER COMPLETE — "no per-kernel proof" machinery PROVEN ═════
+Swapped the Prop InstrSupported (not decidable — existentials over Int/String, Float in TritonOp)
+for a COMPUTABLE Bool instrSupported : TritonInstr → Bool that structurally matches op+args
+(extracts args via patterns, no existentials). generic_step now takes (instrSupported instr = true)
+and proves via `split at hsupp <;> first | exact *_step_generic instr _ _ (by assumption).. | ..`.
+All green, sorry 4/4.
+
+VERIFIED native_decide-able: instrSupported ⟨"r",.constant 5,[]⟩ = true  and
+instrSupported ⟨"r",.dot,["a","b"]⟩ = false  both by native_decide (0 errors). So
+"∀ instr ∈ K, instrSupported instr = true" is machine-checked per concrete kernel — NO hand proof.
+(TritonInstr field order confirmed: ⟨result, op, args⟩.)
+
+THE "ANY .ttir, NO PER-KERNEL PROOF" MACHINERY IS NOW PROVEN:
+  instrSupported (decidable) + generic_step (dispatch) + prefix_faithful_wfi (kernel-agnostic fold).
+For any kernel K of supported ops: (List.all K instrSupported) native_decides, feeding
+generic_step into the fold gives FaithfulWFI over all of K — with ZERO per-kernel Lean.
+
+REMAINING (integration, not new proof content):
+  1. kernel driver theorem: (K.all instrSupported = true) → FaithfulWFI (evalKernel K s)(symEvalKernel K ss) mem
+     — thin wrapper: prefix_faithful_wfi with hstep := fun i hi => generic_step i (by have := List.all_eq_true.. ; ...)
+  2. parser wiring: Parser.lean parseKernel produces K from real .ttir text (currently dead code)
+  3. top-level verify: parse file -> driver -> terminal store -> native_decide grid instances
+  4. run on real vector_add_tutorial.ttir end-to-end
+
+═══ KERNEL DRIVER LANDED — "any supported kernel, no per-kernel proof" is PROVEN ═
+kernel_faithful_of_supported (K)(hall : K.all instrSupported = true)(s ss mem)(h : FaithfulWFI)
+  : FaithfulWFI (evalKernel K s)(symEvalKernel K ss) mem.
+Green, sorry 4/4. Proof: prefix_faithful_wfi with hstep := fun instr hmem => generic_step instr
+(hall-extracted via List.all_eq_true) — folds generic_step over ALL of K. The premise is a single
+native_decide.
+
+★ THE GOAL IS MECHANIZED ★ For ANY kernel K built from the 10 supported ops:
+  `K.all instrSupported = true`  is proved by native_decide (no hand proof), and
+  kernel_faithful_of_supported then yields full symbolic-concrete faithfulness over K.
+Zero per-kernel Lean. Adding a NEW op = add its *_step_generic + one line in instrSupported +
+one `first | ..` arm in generic_step (a per-OP cost, paid once, never per-kernel).
+
+REMAINING (integration/plumbing, NOT new proof content):
+  1. parser: Parser.lean parseKernel is DEAD CODE — wire it so real .ttir text -> K. OR provide a
+     verified hand-encoding path. (Parsing correctness itself is trusted/unverified — the parser is
+     the TCB boundary; document this.)
+  2. top-level verify theorem for a concrete kernel+grid: instantiate init state, run driver, handle
+     terminal store (store_tensor_masked_faithful / store_tensor_faithful directly), native_decide
+     the concrete pid instances (like tutorial_sound_pid0/1).
+  3. run end-to-end on real vector_add_tutorial.ttir (masked): its ops are constant/gpid/muli/
+     make_range/splat/addi/addptr/cmpi_slt/load[p,m]/store[p,v,m] — ALL supported (store terminal).
+
+═══ END-TO-END CONNECTED: real masked .ttir → all-supported prefix + terminal store ═
+Ran the REAL kernels/vector_add_tutorial.ttir through the actual parser (parseKernel, previously
+"dead code" — it WORKS). Results:
+  - parseKernel → 18 instructions, correct ops+args extracted (masked loads parse as load [ptr,mask_2],
+    masked store as store [1, output, mask_2]).
+  - pre = k.dropLast (17 instrs): pre.all instrSupported = TRUE. Every prefix op dispatches:
+    constant, get_program_id 0, muli, make_range (some 1024), splat[1024]×4, addi, cmpi_slt (mask!),
+    addptr×3, load[p,m]×2 (masked), addf.
+  - terminal = k.getLast? = some store (the masked store, args [1, output, mask_2]).
+So the real kernel splits EXACTLY as the machinery expects: all-supported prefix (native_decidable)
++ terminal masked store (store_tensor_masked_faithful). NO per-kernel proof for the prefix.
+
+★★ THE GOAL IS DEMONSTRATED ON THE REAL KERNEL ★★ parser (TCB) + instrSupported (native_decide) +
+kernel_faithful_of_supported (prefix) + store_tensor_masked_faithful (terminal) = full pipeline.
+
+FINAL ASSEMBLY remaining:
+  1. verify_kernel theorem: parseKernel src = some k → let pre=k.dropLast, store=k.getLast?;
+     (pre.all instrSupported) ∧ (store is a masked store with concrete addr+mask) →
+     FaithfulWFI over pre (via kernel_faithful_of_supported) then StatesFaithful through store.
+     Structure already exists as kernel_faithful_wfi_terminal_store (arbitrary prefix + terminal store)!
+     Just feed generic-fold prefix + store_tensor_masked_faithful into it.
+  2. Concrete grid instance for vector_add_tutorial + native_decide (like tutorial_sound_pid0/1) to
+     get a closed soundness certificate for the real kernel.
+  3. Note: parser correctness is TRUSTED (the TCB boundary) — document. Everything AFTER parse is proven.
+
+═══★ verify_kernel LANDED — the "any .ttir, no per-kernel proof" entry point ★═══
+verify_kernel (pre)(storeInstr)(hpre_all : pre.all instrSupported = true)(hstore : store faithful)
+  (s ss mem)(h : FaithfulWFI) : StatesFaithful (evalKernel (pre ++ [storeInstr]) s)(symEvalKernel..).
+Green, sorry 4/4. Built on kernel_faithful_wfi_terminal_store: prefix via generic_step (dispatched
+from hpre_all, native_decide-able), terminal store via hstore.
+
+THE FULL PIPELINE (all proven, all green):
+  parseKernel (TCB) : .ttir text → K
+  K.dropLast = pre, K.getLast? = storeInstr
+  pre.all instrSupported = true          ← native_decide, NO hand proof
+  verify_kernel pre store hpre_all hstore ← StatesFaithful over the whole kernel
+  hstore := store_tensor_masked_faithful (masked) / store_tensor_faithful (unmasked)
+Adding a new op: add *_step_generic + 1 line in instrSupported + 1 arm in generic_step. PER-OP,
+never per-kernel. This is EXACTLY the stated goal, mechanized and demonstrated on the real masked
+vector_add_tutorial.ttir (17-instr all-supported prefix + terminal masked store, confirmed by #eval).
+
+TCB NOTE: parser correctness is TRUSTED (not formally verified). "Verified" = "verified given the
+parser faithfully models the .ttir". Standard boundary; documented.
+
+OPTIONAL NEXT (polish, not core): (a) a concrete verify_vector_add theorem instantiating
+verify_kernel on the parsed real kernel + native_decide grid instance for a closed certificate;
+(b) more ops (subi/maxsi/select/reductions) to widen the supported set for softmax etc.; each is
+per-op work, never per-kernel. CORE GOAL: DONE.
+
+═══════════════════════════════════════════════════════════════════════════════
+★★★ GOAL COMPLETE: verify_kernel_masked — the single-command "any .ttir, all inputs,
+    no per-kernel proof" verifier is PROVEN. Green, sorry 4/4. ★★★
+═══════════════════════════════════════════════════════════════════════════════
+verify_kernel_masked (pre)(storeInstr)(p val m)(n)(s ss mem)(h_op h_args)
+  (hpre_all : pre.all instrSupported = true)
+  (hpc/hmc/hvc : symTensorAllConcrete (symEvalKernel pre ss) {p,m,val} n = true)
+  (h : FaithfulWFI s ss mem)
+  : StatesFaithful (evalKernel (pre ++ [store]) s) (symEvalKernel (pre ++ [store]) ss) mem.
+
+ALL hypotheses are either the init FaithfulWFI (established once per init-state shape) or DECIDABLE
+Bool checks (hpre_all, hpc, hmc, hvc) — every one native_decide-able on a concrete parsed kernel.
+StatesFaithful over ARBITRARY symbolic ss = faithfulness for ALL INPUTS (inputs stay symbolic).
+
+Proof: fold generic_step over pre (via hpre_all) → FaithfulWFI at post-prefix state → apply
+masked_store_faithful_of_concrete (the bridge) at THAT state, where hpc/hmc/hvc give concreteness.
+Design catch: kernel_faithful_wfi_terminal_store wanted ARBITRARY-state store faithfulness, which
+the bridge can't give (concreteness is state-specific); inlined the fold + applied store at the
+SPECIFIC post-prefix state instead. Clean.
+
+THE FULL PIPELINE, ALL PROVEN (sorry 4/4 throughout the entire session):
+  parseKernel (TCB, trusted) : .ttir text → K = pre ++ [store]
+  pre.all instrSupported                    ← native_decide
+  symTensorAllConcrete (post-prefix) p/m/val ← native_decide
+  verify_kernel_masked                       → StatesFaithful for ALL inputs
+Adding a new op = 1 step lemma + 1 instrSupported line + 1 generic_step arm. PER-OP, never per-kernel.
+Demonstrated: real vector_add_tutorial.ttir parses to 17-instr all-supported prefix + masked store.
+
+TCB: parser correctness trusted (not verified). Everything post-parse is machine-checked.
+CORE GOAL: ACHIEVED.
+
+Optional future: (a) a #eval-able top-level `checkTTIR : String → Bool` wrapper wiring parse+split+
+the two decide checks into one call (pure plumbing); (b) widen supported ops (subi/maxsi/select/
+reductions) for softmax etc. — each per-op, never per-kernel.
+
+═══ checkTTIR LANDED — the executable command-line verifier. GOAL FULLY COMPLETE. ═
+checkTTIR (src : String)(pid bs : Nat) : Bool — parses src, splits pre ++ [store], runs the four
+decidable checks that ARE verify_kernel_masked's hypotheses: pre.all instrSupported, pointer
+concrete, mask concrete, value tensor present. Returns true IFF proven sound for all inputs.
+Landed in Checker.lean (added import Trident.Target.Parser). Full lib green (13 jobs), sorry 4/4.
+CONFIRMED true/true on real masked vector_add_tutorial.ttir (pid 0 and 1). Backed by the theorem.
+Correctness fix (checkTTIR returned false first): stored value output=x+y is input-dependent hence
+non-concrete; bridge fixed to need value EXISTENCE only, pointer+mask concrete. Checks at WIDTH bs.
+★ THE COMMAND: checkTTIR <ttir-source> <pid> <block_size> → true = verified for all inputs. ★
+
+═══ 2D-SHAPE MIGRATION COMPLETE — foundation for matmul/any-.ttir ═══════════════
+Changed SymValue.tensor from (Nat)(Nat→Expr) to (List Nat)(Nat→Expr) — carries a SHAPE, mirroring
+concrete TritonValue.tensor (shape : List Nat)(vals : List Int). Added shapeProd (flat element
+count) + shapeProd_singleton simp lemma. Full lib green, sorry 4/4, checkTTIR true/true on real
+vector_add_tutorial.ttir — the existing verifier survived the migration intact.
+
+DESIGN DECISION (key): symbolic env stores tensors as flat [flatlen]-shaped (1D view) at the
+faithfulness boundary — because concrete memory is flat and the correspondence is over flat indices.
+True multi-dim shapes live TRANSIENTLY inside symEvalOp (where dot/broadcast/expand_dims compute
+index mappings), not in stored values. This keeps faithfulness (hten: SymValue.tensor [vals.length])
+consistent and 1D-flat while enabling 2D op logic.
+
+MIGRATION STATS: Symbolic.lean 14 errors→0, Semantics.lean 0 (concrete side already shaped),
+Soundness.lean 57→0, Checker.lean 20→0. All mechanical families: bare-Nat shapes → [n]; length
+guards (xs.length==ys.length) → list form ([xs.length]==[ys.length]); concrete if-guards needed
+nat-form facts alongside list-form; injections on [a]=[b] peel to a=b via injection/simp
+List.cons.injEq/omega; make_range/splat conv patterns rebracketed; shapeProd_singleton reduces
+shapeProd [x]=x for store folds.
+
+STILL 1D IN PRACTICE: nothing yet PRODUCES a genuine 2D stored tensor — make_range/splat/etc. all
+build [flatlen]. The TYPE now supports 2D; next is making dot/expand_dims/broadcast actually use
+multi-dim shapes in their index logic, then a matmul init-state + loop handling. Foundation done.
+
+Pre-migration fallback tag: f045e81.
+
+═══ MATMUL BLOCKER PRECISELY DIAGNOSED: the WF1 rank-1 invariant ════════════════
+Added symbolic expand_dims + broadcast (symExpandDims, symBroadcast in Symbolic.lean, wired into
+symEvalOp, full lib green, sorry 4/4, committed). But their FAITHFULNESS lemmas cannot land yet.
+
+ROOT CAUSE: TritonValue.WF1 (Values.lean) is DEFINED rank-1:
+    WF1 (tensor sh vals) := sh = [vals.length]
+i.e. the entire proof layer assumes every tensor is 1D [length]. 2D tensors ([64,32] in matmul)
+VIOLATE WF1 by construction. WF1 is used 77× in Soundness.lean + 3× Checker.
+
+Also the faithfulness relation (StatesFaithful, hten clause, line ~29) hardcodes the symbolic side
+as SymValue.tensor [vals.length] g — flat 1D — even after the List Nat type migration.
+
+WHAT 2D REQUIRES (the roadmap, in order):
+  1. New rank-agnostic wellformedness WFn (tensor sh vals) := shapeProd sh = vals.length.
+     (WF1 becomes the special case sh = [vals.length].)
+  2. Generalize hten to carry the TRUE shape: ss.env v = some (SymValue.tensor sh g) with the
+     correspondence still over flat indices i < vals.length. This is the SHARED CHOKEPOINT — every
+     WF1 consumer sees the changed shape.
+  3. Elementwise binary proofs (add/cmpi/addptr, the hwa/hwb + `sha == shb` derivations) currently
+     get shape-equality FROM WF1 (both = [length]). Under the general relation they must derive it
+     from the ops' own shape guards instead. ~10-15 elementwise/store/load proofs to rework.
+  4. THEN expand_dims/broadcast/dot faithfulness lemmas land (they need real shapes in the relation).
+  5. THEN the loop (scf.for parse + loop-invariant proof for arbitrary trip count ⌈K/32⌉) — separate
+     big pillar, 2-4 sessions.
+  6. THEN matmul init-state + block-ptr arith + f16/dense/assume + a matmul checkTTIR path.
+
+SIZE: WFn/hten generalization ~1 session; 2D-op faithfulness ~1; loop ~2-4; matmul integ ~1-2.
+Total matmul-complete: still ~5-8 sessions from here. This session banked: masked store, generic
+dispatcher, verify_kernel_masked, checkTTIR, FULL 2D-type migration, symbolic expand_dims/broadcast.
+
+DO NOT start the WFn/hten change without a fresh session + ability to iterate against live errors —
+it's 77+ interdependent sites through the shared relation; blind patching won't converge. Fallback
+tags: f045e81 (pre-2D), and the 2D-migration commit + the expand/broadcast commit after it.
+
+═══ WFn FOUNDATION LANDED (rank-agnostic wellformedness) ════════════════════════
+TritonValue.WFn (tensor sh vals) := shapeProd sh = vals.length — the rank-agnostic invariant.
+WF1_imp_WFn : t.WF1 → t.WFn (rank-1 is the special case). WFn_tensor_len extraction. shapeProd
+relocated from Symbolic to Values.lean (top-level, before namespace TritonValue, so visible
+unqualified everywhere). Full lib green, sorry 4/4, committed. WF1 UNTOUCHED (77 existing sites
+still use it) — WFn coexists. This is the safe base for the hten generalization.
+
+NEXT (the shared chokepoint, needs a session with live-error iteration):
+  Generalize StatesFaithful's hten clause from SymValue.tensor [vals.length] g to SymValue.tensor
+  sh_sym g carrying the true shape, tie via shapeProd sh_sym = vals.length. Then rework the ~10-15
+  elementwise/store/load proofs whose shape-equality currently comes from WF1. Then expand_dims/
+  broadcast/dot faithfulness lemmas land. Then the loop. Then matmul integration.
+
+═══ hten FAITHFULNESS GENERALIZATION COMPLETE — the chokepoint is cleared ═══════
+StatesFaithful's tensor clause now carries the TRUE shape: hten gives
+  ss.env v = some (SymValue.tensor sh g)  (was [vals.length] g)
+with correspondence still over flat indices i < vals.length. bind_tensor_faithful conclusion
+generalized [cvals.length] -> sh. Drove Soundness 48 errors -> 0, full lib green, sorry 4/4,
+checkTTIR true/true on real vector_add_tutorial.ttir. Checker needed ZERO changes.
+
+HOW (systematic, family-by-family, same as the 2D-type migration):
+  - 29 hten-restatement hypotheses in step lemmas: [vals.length] g -> sh g (sh already bound).
+  - bind_tensor_faithful conclusion -> sh (it already took sh param).
+  - make_range/splat convs REMOVED (they rewrote shape to [maplen]; now shapes match sh both sides).
+    symbolic splat changed to produce `shape` not [shapeProd shape] (match concrete).
+  - Elementwise (addf/addi/cmpi/muli/addptr tt+st): the KEY fix was replacing
+      `have hshape : sha==shb` (Bool) + `rw [if_pos hshape]`  [FAILS - Bool vs Prop]
+    with
+      `have hshape : (sha==shb)=true` + `simp only [hshape, if_true, Option.bind_some]`.
+    Removed stale `rw [hlen2]` / `rw [show X.length=(map).length]` / redundant list-form if_pos
+    (concrete side now auto-reduces). Else-branches: `simp only [hshape, if_false,
+    Bool.false_eq_true, ↓reduceIte]`.
+  - Masked load lemma: ADDED hypothesis hsheq : sh = shm (ptr & mask same shape). Caller derives it
+    from WF1 on both operands + hlen. Symbolic guard sh==shm discharged via hsheq.
+    Mismatch branch: derive (sh==shm)=false via WF1 (both = [len]) + hlen.
+  - Store lemma (store_tensor_masked_faithful): hgp/hgv/hgm hypotheses [addrs.length]/[masks.length]
+    -> sh/shv/shm. ADDED hypothesis hwfp : shapeProd sh = addrs.length; used to rw the fold range
+    from `shapeProd sh` to `addrs.length` before masked_range_fold_mem_faithful. Fixed a latent bug
+    (hgv had `sh` instead of `shv`).
+  - Bridge (masked_store_faithful_of_concrete): symTensorAllConcrete_elim gives [n], hten gives shp
+    (true shape). Injection now yields [n]=shp (not [n]=[m]). Recover n=addrs.length via
+    WFn_tensor_len + WF1_imp_WFn (shapeProd shp = addrs.length) combined with [n]=shp. Pass hp_wfn
+    as the store lemma's hwfp.
+
+KEY TACTIC LESSON: to reduce `if (c)=true then a else b` given `hc : c=true`, use
+`simp only [hc, if_true]` NOT `rw [if_pos hc]` — the latter is Decidable-instance-sensitive and
+often fails to match. Concrete evalInstr sides auto-reduce the `match some`/`if` once the guard
+fact is a `=true`/`=false` Bool eq in the simp set.
+
+NOW UNBLOCKED: expand_dims/broadcast/dot FAITHFULNESS step lemmas can finally land (they needed real
+shapes in the relation). Then: the loop (scf.for parse + invariant), then matmul init + integration.
+Fallback tags: f045e81 (pre-2D), 2D-migration, expand/broadcast, WFn, and now hten-generalization.
+
+═══ expand_dims_faithful DONE + broadcast scoped ════════════════════════════════
+expand_dims_faithful PROVEN and committed (d88ebf6) — Soundness green, sorry 4/4. First 2D-op
+faithfulness lemma. Proof is trivial: expand_dims keeps flat data + index fn identical (only shape
+gains a size-1 axis), so after `simp only [evalInstr, symEvalInstr, symEvalOp, evalOp, symExpandDims,
+Option.bind_some, ...]` the goal closes via `apply bind_tensor_faithful ... ; exact hcorr`. This
+CONFIRMS the hten generalization delivers 2D-op faithfulness as designed.
+
+broadcast_faithful — NEXT, scoped but not trivial. Concrete broadcast [t0,t1] from [s0,s1]:
+output has t0*t1 elems; output idx reads vals.getD (si*s1+sj) where si=(if s0==1 then 0 else idx/t1),
+sj=(if s1==1 then 0 else idx%t1). symBroadcast applies the SAME remap to the symbolic fn f.
+Correspondence at output i: evalExpr (f (si*s1+sj)) = vals.getD (si*s1+sj) via hcorr — but this
+requires the bounds obligation si*s1+sj < vals.length (= s0*s1 via WFn).
+
+BOUNDS LEMMA (the crux): `si*s1 + sj < s0*s1`. Proof approach (VALIDATED as sound, needs tactic
+cleanup): sj < s1 (mod_lt when s1!=1, else 0<s1); si < s0 (div_lt_of_lt_mul when s0!=1, else 0<s0);
+then si*s1+sj < (si+1)*s1 ≤ s0*s1. Needs hs1pos : 0 < s1. Draft in /tmp had 5 errors — the two
+`omega` calls after `split` can't see the if-condition (need to case on `beq_iff_eq` first / feed
+the branch hypothesis to omega), and the last step's `ring`/`Nat.mul_le_mul_right` needs the right
+lemma name+arg order (try `Nat.mul_le_mul_right` may want the factor explicit, or use `Nat.mul_le_mul`
+/ nlinarith-style `omega` after `Nat.succ_mul`). Once bounds lands, the correspondence + WFn
+(shapeProd [s0,s1] = s0*s1 = vals.length) closes broadcast like expand_dims.
+
+AFTER broadcast: dot (reduction — hardest op, accumulates a sum over K), then the loop (scf.for parse
++ invariant), then matmul init + integration. Fallback tags now include: hten-generalization (a0f7eea),
+expand_dims (d88ebf6).
+
+═══ broadcast_faithful DONE — both shape-manipulation 2D ops verified ═══════════
+broadcast_bounds (6779f4d) + broadcast_faithful (805672e) committed. Full lib green, sorry 4/4.
+broadcast_faithful uses WFn (NOT WF1 — a 2D [s0,s1] tensor violates WF1 since [s0,s1]≠[vals.length];
+it satisfies WFn: shapeProd [s0,s1] = s0*s1 = vals.length). Proof: unpack hten, get s0*s1=vals.length
+via WFn_tensor_len (simp [shapeProd, List.foldl, Nat.one_mul] to kill the 1* accumulator), reduce
+both sides via simp [..., symBroadcast], apply bind_tensor_faithful, then per-output-index i the
+concrete reads vals.getD (remap i) and symbolic reads g (remap i); hcorr (remap i) closes it with
+the in-bounds fact from broadcast_bounds (remap i < s0*s1 = vals.length).
+KEY: both expand_dims_faithful and broadcast_faithful now exist. expand_dims uses WF1-free (data
+identical); broadcast REQUIRES WFn (WF1 is false for 2D). This is the first place WFn is load-bearing.
+
+NEXT: dot_faithful — THE HARD ONE. dot is a REDUCTION (matmul: C[i,j] = sum_k A[i,k]*B[k,j]), not a
+per-index map. The concrete doDot accumulates a sum over the K dimension. The faithfulness proof will
+need INDUCTION over the reduction (the symbolic side must mirror the accumulation as a nested
+Expr.add fold, and the correspondence proved by induction on K). This is a genuinely new proof shape
+vs the map-style ops — budget a full fresh session. Look at concrete doDot in Semantics.lean and
+whether symbolic dot exists in symEvalOp (it may not yet — check .dot case; if absent, must first
+DEFINE symDot mirroring doDot's accumulation, like we did for symBroadcast).
+
+AFTER dot: the loop (scf.for parse + invariant, 2-4 sessions), then matmul init + integration.
+2D-op faithfulness layer is 2/3 done. Fallback tags: hten-gen (a0f7eea), expand_dims (d88ebf6),
+broadcast_bounds (6779f4d), broadcast (805672e).
+
+═══ dot MATHEMATICAL MACHINERY COMPLETE (all proven, pushed to remote) ══════════
+The conceptually hardest part of dot — the REDUCTION correspondence — is DONE:
+  - evalExpr_reduceSum_map_mul: evalExpr (reduceSum ((range K).map (k => mul (fa k)(fb k)))) mem
+      = (range K).foldl (fun acc k => acc + ca k * cb k) 0, given ha/hb factor correspondence.
+    Proved via foldl_range_congr (general: two foldls over range K agree if step fns agree pointwise;
+    by list induction). KEY FACT enabling this: evalExpr (reduceSum es) = es.foldl (+) 0, so symbolic
+    reduceSum evaluates to exactly the concrete sum-fold.
+  - dot_boundsA: i*k1+kk < m*k1 (A read in bounds; A is [m,k1]). Same succ_mul + mul_le_mul_right
+    pattern as broadcast_bounds.
+  - dot_boundsB: kk*n+j < k1*n (B read in bounds; B is [k1,n]).
+All committed AND PUSHED (9cd6c8e). Soundness green, sorry 4/4. 11 commits now on origin/main.
+
+REMAINING for dot_faithful (the assembly — structural, needs a fresh session):
+  PROBLEM: symbolic .dot (Symbolic.lean ~L431) does NOT structurally match concrete doDot
+  (Semantics.lean ~L383):
+    - Concrete doDot: dims from operand SHAPES [m,k1]×[k2,n], guards k1=k2, INCLUDES accumulator
+      (sum + acc.getD idx 0), result [m,n]. Inner sum = (range k1).foldl (+) over valsA[i*k1+kk]*valsB[kk*n+j].
+    - Symbolic (current): infers K from env "K_dim" + M=shapeProd na/K, N=shapeProd nb/K (a HACK),
+      NO k1=k2 guard, NO accumulator, builds reduceSum of Expr.mul (fa(i*K+k))(fb(k*N+j)), result [M,N].
+  FIX (step 1): REWRITE symbolic .dot to mirror doDot structurally — match on tensor shapes
+    [m,k1]×[k2,n], guard k1==k2, add the accumulator term (as Expr.add with the acc tensor's fn),
+    result [m,n], inner = reduceSum ((range k1).map (k => mul (fa (i*k1+k)) (fb (k*n+j)))). NOTE the
+    A-index must be i*k1+kk (matching concrete i*k1+kk) and B-index kk*n+j. Current symbolic uses
+    i*K+k / k*N+j which matches IF K=k1,N=n — but the dimension INFERENCE differs, that's the problem.
+  FIX (step 2): assemble dot_faithful like broadcast_faithful: unpack hten on BOTH operands (+ acc if
+    present), WFn gives m*k1=valsA.length & k1*n=valsB.length, reduce both sides, bind_tensor_faithful,
+    per-output-idx use evalExpr_reduceSum_map_mul with fa:=(fun kk => gA(i*k1+kk)), fb:=(fun kk =>
+    gB(kk*n+j)), and dot_boundsA/dot_boundsB for the in-bounds facts fed to hcorr. Accumulator handled
+    by a final Expr.add whose eval = acc correspondence.
+  This changes op BEHAVIOR (symbolic .dot output for existing kernels) — after rewriting, re-run full
+  lib build + checkTTIR on vector_add (should be unaffected since it has no dot) to confirm no regression.
+
+AFTER dot_faithful: the loop (scf.for parse + invariant), then matmul init + integration.
+2D-op layer: expand_dims ✓, broadcast ✓, dot machinery ✓ (assembly pending). Tags: broadcast (805672e),
+dot-machinery (9cd6c8e).
+
+═══ dot_faithful DONE — ALL THREE 2D OPS VERIFIED ══════════════════════════════
+dot_faithful PROVEN + pushed (6931aa9). Full lib green, sorry 4/4, checkTTIR true/true (no regression).
+The matmul core reduction is now formally faithful. 2D-OP FAITHFULNESS LAYER COMPLETE:
+  expand_dims_faithful ✓  broadcast_faithful ✓  dot_faithful ✓
+
+HOW dot_faithful was assembled (2-arg, no-accumulator case):
+  1. Rewrote symbolic .dot (Symbolic.lean) to structurally mirror concrete doDot: match operand
+     shapes [m,k1]×[k2,n], guard k1==k2 (bne), A-index i*k1+kk, B-index kk*n+j, output [m,n],
+     accumulator via Expr.add sum (fAcc idx). (a3ba332)
+  2. Proved reduction machinery (9cd6c8e): foldl_range_congr, evalExpr_reduceSum_map_mul (the
+     symbolic reduceSum-of-products evaluates to the concrete sum-fold — KEY fact:
+     evalExpr (reduceSum es) = es.foldl (+) 0), dot_boundsA (i*k1+kk<m*k1), dot_boundsB (kk*n+j<k1*n).
+  3. dot_faithful: unpack hten on both operands, WFn gives m*k1=valsA.length & k1*n=valsB.length
+     (simp [shapeProd, List.foldl, Nat.one_mul]), reduce both sides (the none-accumulator +0 needs
+     Int.add_zero NOT Nat.add_zero — the fold is over Int!), bind_tensor_faithful, then per-output
+     idx: hi:=idx/n<m (Nat.div_lt_iff_lt_mul + omega), hj:=idx%n<n (mod_lt), and
+     evalExpr_reduceSum_map_mul with fa/fb = gA/gB at the flattened indices, correspondence supplied
+     by hcorrA/hcorrB through dot_boundsA/dot_boundsB. Hypotheses: hwfA, hwfB (WFn), hnpos : 0<n.
+
+REMAINING TO MATMUL: the two big pillars left are
+  1. THE LOOP: scf.for / scf.yield. Parser is flat-list only — needs to represent loop bodies +
+     loop-carried iter_args (matmul accumulates the dot result across ⌈K/BLOCK_K⌉ iterations). Then a
+     LOOP-INVARIANT proof for arbitrary trip count — a genuinely new proof style (induction over
+     iterations). This is the hardest remaining pillar, 2-4 sessions, least predictable.
+  2. MATMUL INTEGRATION: matmul init-state (block pointers, K_dim), the many arith ops in the real
+     kernel (divsi/subi/minsi/remsi/truncf/andi/dense-constants/f16-f32/llvm.intr.assume), a matmul
+     checkTTIR path, end-to-end on matmul_tutorial.ttir. 1-2 sessions.
+  NOTE: dot_faithful currently proves the 2-ARG case. The 3-arg (accumulator) case — needed for the
+  loop body — is defined in symbolic .dot but its faithfulness lemma is NOT yet proven (the Expr.add
+  sum (fAcc idx) correspondence). That's a natural extension once the loop needs it.
+
+Tags: broadcast (805672e), dot-machinery (9cd6c8e), symbolic-dot-rewrite (a3ba332), dot_faithful (6931aa9).
+
+═══ loop_faithful_skeleton DONE — both remaining pillars' HARD PROOFS are cleared ═
+loop_faithful_skeleton PROVEN + pushed (edd4959). Full lib green, sorry 4/4. This is the abstract
+core of scf.for faithfulness: for ARBITRARY trip count, if each body iteration preserves relation R
+on the carried (concrete C, symbolic S) state, the whole loop-fold preserves R. Proved by induction
+on the iteration list (List.range trip). Parser/AST-INDEPENDENT — it's a clean abstract lemma:
+  R : C → S → Prop, cbody/sbody : Nat → state → state, trip : Nat,
+  hstep (each iter preserves R) + hinit (R c0 s0) → R (foldl cbody) (foldl sbody).
+
+SIGNIFICANCE: the two genuinely-novel proofs that blocked matmul are now BOTH done —
+  - dot's reduction correspondence (evalExpr_reduceSum_map_mul, induction over K)
+  - the loop's invariant induction (loop_faithful_skeleton, induction over iterations)
+Everything remaining is PLUMBING (infrastructure + wiring), not new proof theory.
+
+REMAINING TO MATMUL (plumbing):
+  1. LOOP WIRING (next, the big infra piece — touches parser/semantics/symbolic):
+     - The real matmul loop (matmul_tutorial.ttir L84): scf.for %k=0 to %6 step 1 with 3 ITER_ARGS
+       (a_ptrs, b_ptrs, accumulator:64x64xf32). Body = 16 instrs: muli/subi/splat/cmpi/broadcast to
+       build masks, 2 masked tt.loads (A tile 64x32, B tile 32x64), tt.dot %a,%b,%accumulator (3-ARG
+       accumulator dot!), 2 addptr to advance pointers. scf.yield the 3 updated values.
+     - MUST extend TritonInstr/TritonKernel AST (Dialect.lean) to represent a loop node: trip-count
+       expr + iter_arg bindings + body sub-kernel + yield. Currently flat-list only. Then evalLoop
+       (Semantics) + symEvalLoop (Symbolic) that foldl the body over range trip threading iter_args.
+     - Then instantiate loop_faithful_skeleton: R = StatesFaithful (restricted to carried vars),
+       hstep discharged by the body's per-op faithful lemmas via the generic dispatcher.
+     - PREREQUISITE: prove the 3-ARG accumulator dot_faithful (dot_faithful currently 2-arg only).
+       The symbolic .dot already handles 3-arg (Expr.add sum (fAcc idx)); the lemma needs the acc
+       tensor's hten correspondence + the same reduction machinery, plus a `+ acc[idx]` term.
+  2. MATMUL INTEGRATION: init-state (block ptrs, K_dim in env), remaining arith ops
+     (divsi/subi/minsi/remsi/truncf/andi/dense f16 constants/llvm.intr.assume), matmul checkTTIR path,
+     end-to-end native_decide on matmul_tutorial.ttir.
+
+Tags: dot_faithful (6931aa9), loop-skeleton (edd4959).
+
+═══ LOOP PROOF INFRASTRUCTURE COMPLETE (pushed c5a7d75) ═════════════════════════
+The scf.for loop is now formally handled. Landed + pushed, full lib green sorry 4/4, no regression:
+  - ForLoop struct (Dialect.lean): {ivName, trip, body : TritonKernel}. SEPARATE from TritonInstr so
+    the flat path + 50 ops + parser are untouched. iter_args thread through the state env (body writes
+    loop-carried var names; next iteration reads them; induction var bound under ivName each iter).
+  - evalForLoop (Semantics) / symEvalForLoop (Symbolic): foldl body over (range trip), binding iv as
+    TritonValue.scalar (Int.ofNat k) / SymValue.scalar (Expr.lit (Int.ofNat k)) each iteration.
+  - forLoop_faithful (Soundness): if hbody (each iteration preserves StatesFaithful) then the whole
+    loop preserves it — direct instantiation of loop_faithful_skeleton. ARBITRARY trip count.
+
+BOTH remaining pillars' HARD PROOFS are now DONE: dot's reduction correspondence AND the loop's
+invariant induction + wiring. Everything left is PLUMBING (discharge hbody + parser + integration).
+
+REMAINING TO END-TO-END MATMUL:
+  1. DISCHARGE hbody for the real matmul body: the body is a flat TritonKernel of ~16 supported ops
+     (muli/subi/splat/cmpi/broadcast/2x masked-load/dot/2x addptr). Each preserves StatesFaithful via
+     the per-op faithful lemmas — this is exactly what the generic dispatcher (generic_step +
+     instrSupported + kernel_faithful_of_supported) already does for flat kernels! So hbody should
+     follow from applying the existing generic machinery to loop.body (after binding the iv). MAY need
+     to prove the 3-ARG accumulator dot_faithful first (dot_faithful is 2-arg; the loop body's tt.dot
+     has the accumulator) and add it to the dispatcher.
+  2. PARSER: extend to recognize scf.for/scf.yield and build a ForLoop (trip-count from the loop
+     header, body = parsed sub-kernel, iv name). Currently flat-list only; scf.for is nested.
+  3. MATMUL INTEGRATION: init-state (block ptrs, K_dim in env), remaining arith ops
+     (divsi/subi/minsi/remsi/truncf/andi/dense f16 constants/llvm.intr.assume), matmul checkTTIR path
+     wrapping pre-loop ++ [loop] ++ post-loop, end-to-end native_decide on matmul_tutorial.ttir.
+
+Tags: dot_faithful (6931aa9), loop-skeleton (edd4959), loop-infra (c5a7d75).
+
+═══ checkVectorAdd + checkVectorAdd_sound (commit 662f548) ═══
+DONE: general, sorry-free, CLI-runnable "0 bugs" verifier for vector-add .ttir.
+- checkVectorAdd (Checker.lean): parse → pre++[store] → 4 faithfulness checks
+  (instrSupported / ptr concrete / mask concrete / value shape) + per-lane sweep:
+  in-bounds lane i → symCheckVectorAddTutorial == vectorAddSpecExpr; tail lane → == lit 0.
+- checkVectorAdd_sound: ∀ src, parseKernel src = some k → ∀ a b (len n) → ∀ i<bs →
+  readMem (2n+pid*bs+i) = if in-bounds then a[·]+b[·] else 0. Routed through
+  verify_kernel_masked (NOT symEval_sound). #print axioms = [propext, Classical.choice,
+  Quot.sound] — no sorryAx.
+- Tail correctness folded INTO faithfulness bridge (masked store's filterMap drops
+  masked lanes; unwritten output addr keeps init lit 0). Reusable for matmul/softmax:
+  only the spec expr (vectorAddSpecExpr analogue) changes per kernel family.
+- dropLast_getLast?_eq: self-contained list lemma (Mathlib's dropLast_append_getLast?
+  is NOT importable in this module — proved by induction instead).
+- CLI: Main.lean → `trident <file.ttir> <pid> <bs> <n>`; existing lean_exe target.
+  Verified vector_add_tutorial.ttir (VERIFIED); a-b mutant → REJECTED.
+- SCOPE: certifies correctness at a GIVEN (pid, n). Next rung = parametric ∀pid∀n
+  (prove the decidable checks hold for all pid/n; the ∀pid concreteness lemma is the
+  crux since native_decide can't range over unbounded n).
+
+═══ MATMUL PROGRESS (this session) ═══
+SOUND & COMMITTED: dot_faithful_acc (3-arg dot), forLoop_faithful, copy_step_generic
+  (.copy op for iter_arg threading) — all axioms [propext, Classical.choice, Quot.sound].
+PARSER DONE: parseMatmulKernel splits matmul_tutorial.ttir → pre(66)/ForLoop(body 18)/post(21),
+  iter_args as trident.copy (init in pre, yield in body), #N results bridged to iter_arg names.
+  Trip count is a PARAMETER (loop bound is runtime SSA %6 = ceil(K/32)).
+NEXT (arithmetic layer, fresh session): ops needed by matmul pre/post that lack _step_generic:
+  subi, divsi, minsi, remsi, andi, truncf (each: symbolic evaluator + ~4 core lemmas + 95-line
+  wrapper, OR build ONE generic binary-int-op lemma parameterized by operator — RECOMMENDED).
+  Easy wins: broadcast_step_generic / expand_dims_step_generic (cores broadcast_faithful @709,
+  expand_dims_faithful @858 already proven — just FaithfulWFI packaging like copy_step_generic).
+  Then: dot typed-dispatch, constant_tensor, dead cmpi_sge/sgt (assume-results), then
+  checkMatmul + checkMatmul_sound (loop-invariant accumulator spec). Float layer separate/later.
+DESIGN DECISION PENDING: generic-binop lemma vs per-op clones. Generic needs symBinop + Expr
+  binop node + generic zip_binop_getD; per-op needs symSub/symDivsi/etc (some currently sorry).
+
+═══ WFn REFACTOR — SCOPED (next major effort, the true matmul blocker) ═══
+ROOT CAUSE: WFState := ∀ ... (tensor sh vals).WF1, and WF1 (Values.lean) is RANK-1 ONLY
+  (sh = [vals.length]). Every matmul tensor is rank-2 ([64,32] etc.), so WFState is FALSE
+  for matmul kernels → generic_step/FaithfulWFI machinery cannot apply. This — not the
+  parser or dot — is why matmul is hard. Vector-add was clean only because it's genuinely rank-1.
+FIX (industry-correct): redefine WFState := ∀ ... (tensor sh vals).WFn (rank-agnostic,
+  shapeProd sh = vals.length). WF1_imp_WFn (Values.lean:112) already exists.
+SCOPE (mapped, ~136 WF1/WFState refs, ~25 bind sites, 11 step lemmas):
+  1. Redefine WFState (2236) to WFn; update WFState_bind_tensor (2239) to take/produce WFn.
+     WFState_bind_scalar (2250) unaffected.
+  2. Producers make_range_produces_WF1 (187), splat_produces_WF1_rank1 (198): add _WFn variants
+     OR lift via WF1_imp_WFn at call sites.
+  3. REAL WORK: every binary op step lemma (addi_step ~2399, addf, muli, subi-to-write, cmpi,
+     addptr, etc.) proves output WFState via WF1 (sh=[len]) + derives shape-eq from length-eq.
+     Under WFn this DIFFERS: must prove shapeProd sh = output_len, and shape-equality comes from
+     the `sha == shb` guard directly (NOT from WF, since equal length ≠ equal rank-2 shape).
+     Each ~is a localized re-proof of the WFState branch. NOT a mechanical lift.
+  4. Checker.lean exposure: only 3 sites (617-619, store-operand lengths) — lift via WF1_imp_WFn.
+  5. After WFn invariant lands: broadcast/expand_dims/dot dispatch cleanly (their cores already
+     take WFn), THEN checkMatmul + checkMatmul_sound (loop-invariant accumulator spec), THEN float.
+RECOMMENDATION: execute WFn refactor as dedicated session(s), one step-lemma at a time, rebuild
+  after each. Invariant changes are highest-stakes — get WFState right before touching consumers.
+
+═══ WFn REFACTOR — PRECISE RESUME STATE (21 errors in Soundness) ═══
+DONE & CORRECT: WFState:=WFn (2239), WFState_bind_tensor takes WFn (2241), evalOp .load
+  masked guards on sh==shm (Semantics.lean — mirrors symbolic, faithful under WFn),
+  cores addi/addf/muli (case sha==shb, derive len from shape), addi/addf output branches,
+  load_tensor_masked_faithful + load_masked_step (hsheq hypothesis), store lemma WF1_imp_WFn drops.
+KEY LESSON: `git checkout` mid-refactor REVERTS uncommitted fixes — WFState def AND
+  bind_tensor sig both silently reverted once, causing phantom errors. COMMIT before any checkout.
+REMAINING 21 (all mechanical, patterns known):
+  - muli_step output branch (~2720): apply addi-output pattern with * / zip
+  - cmpi_slt_tt_faithful core (932) + cmpi_slt_step: transform (case sha==shb) — NOT yet done
+  - addptr_tt_faithful core (2196) + steps: same transform
+  - caller load_masked_step_generic (~3388): case on sh==shm, pass hsheq to load_masked_step
+    (which now takes hsheq not hlen); mismatch branch derive shape-neq
+  - *_step_generic wrappers (3267, 3516-3528): WFn threading
+  - store lemma 2249: Type mismatch (check WF1_imp_WFn residual)
+  - load output closer 2512: unsolved (WFn form)
+  PATTERN for output branches: apply WFState_bind_tensor ...; case sha==shb;
+    have hsheq; have hxy:=rw[←hwa,←hwb,hsheq]; simp[TritonValue.WFn,hwa,length_map,length_zip,hxy,Nat.min_self]
+  Then Step 2: verify Checker builds (3 WF1 sites lift), commit, THEN matmul checkMatmul.
+
+═══ WFn REFACTOR — COMPLETE (commit 4a89cfc) ═══
+DONE: WFState is now rank-agnostic (WFn: shapeProd sh = vals.length). The rank-1 WF1
+invariant that made every rank-2 matmul tensor violate WFState is GONE. Both Soundness
+and Checker build green; vector-add still VERIFIED; checkVectorAdd_sound axiom-clean
+[propext, Classical.choice, Quot.sound]; sorry count 4 (baseline only).
+Method that worked: case every binary op on shape-equality (sha==shb), derive length
+FROM shape via WFn (rw [← hwa, ← hwb, hsheq]) — the reverse of the old rank-1 logic
+which derived shape from length. Masked load: evalOp .load now guards on sh==shm to
+mirror symbolic (was length-guard — a latent rank-1-only faithfulness gap).
+HARD-WON LESSONS: (1) git checkout mid-refactor silently reverts uncommitted edits —
+the WFState def AND bind_tensor sig both reverted once, causing phantom errors; COMMIT
+before any checkout. (2) broad simp/annotation sweeps regress UNLESS the invariant def
+is already consistent; once WFState:=WFn was truly in, sweeps became safe. (3) trace
+goals in isolation (not by line number in a shifting file) to avoid misidentification.
+
+NEXT (now UNBLOCKED by WFn): broadcast_step_generic / expand_dims_step_generic (cores
+already take WFn — just FaithfulWFI packaging), then dot into the dispatcher (typed-
+dispatch: shape facts as decidable checks, cores dot_faithful_acc @776 ready), then
+checkMatmul + checkMatmul_sound (loop-invariant accumulator spec), then float layer.
+
+═══ SHAPE-OP DISPATCH LAYER COMPLETE (through commit fe8f388) ═══
+DONE: broadcast/expand_dims/dot all dispatch into FaithfulWFI, each green + sorry-clean:
+- broadcastCompatible + _elim (2b3ce2a), broadcast_step_generic (d8dac29)
+- expand_dims_step_generic (fdea031) — unconditional, shapeProd preserved by [1]-insert
+- dotCompatible + _elim (9b31ad0), dot_step_generic (fe8f388) — INTEGER dot
+Compat bridges cloned from symTensorAllConcrete pattern (Bool check + _elim to facts,
+native_decide-able). All *_step_generic take concrete shape facts as hypotheses.
+
+KEY FINDING — matmul kernel is FLOAT: kernels/matmul_tutorial.ttir line 95 is
+tt.dot tensor<64x32xf16> * tensor<32x64xf16> -> tensor<64x64xf32>, inputPrecision=tf32.
+Our dot_faithful_acc + entire spine is INTEGER-only. So the tutorial kernel needs the
+float layer (tf32 rounding, non-associative accumulation — research-grade).
+GOOD NEWS: all shape-op TYPES are static in the TTIR (e.g. tensor<64x1> -> tensor<64x32>),
+so compatibility is a per-instruction static check → shape-aware walk is clean (no
+runtime-state threading). Parser must attach declared shapes to instrs.
+
+NEXT (two forks):
+  (A) INTEGER matmul — achievable now: (1) parser attaches shape annotations to broadcast/
+      expand_dims/dot instrs; (2) matmulInstrSupported (Bool incl shape ops w/ static compat);
+      (3) matmul_step dispatching simple→generic_step, shape ops→their *_step_generic;
+      (4) checkMatmul + checkMatmul_sound with loop-invariant accumulator spec (the scf.for
+      body accumulates partial products — the real hard proof, harder than vector-add).
+      Validates the full 2D-contraction architecture over ℤ.
+  (B) FLOAT matmul — research: float dot faithfulness, tf32, non-assoc +. Beyond integer spine.
+RECOMMEND: do (A) first — it exercises the whole loop/accumulator/dispatch architecture on a
+real matmul; (B) is a separate research push.
+
+═══ LOOP THREADING COMPLETE — checkMatmul assembly remains ═══
+DONE this session: WFn refactor (4a89cfc), full shape-op dispatch (broadcast/expand_dims/dot
++ compat bridges, through fe8f388), forLoop_faithful_wfi (threads FaithfulWFI through the
+accumulator loop via general loop_faithful_skeleton). All green, sorry=4, vector-add verified.
+
+REMAINING for integer checkMatmul_sound (the real hard part, NEW proof engineering):
+  1. BODY-DISPATCH (the crux): prove hbody for matmul's loop — walking loop.body preserves
+     FaithfulWFI. HARD because shape ops (broadcast @ttir 89/93, dot @95) need compatible
+     shapes, but hbody's state (c/sc) is abstract. The shapes flow from loop-entry through
+     the body's straight-line computation. Two options:
+       (a) strengthen loop invariant to carry key tensors' shapes at loop entry, OR
+       (b) symbolic-exec-style body proof tracking shapes instruction-by-instruction.
+     This is the "loop invariant" — it lives in the SHAPE domain (which tensor has which
+     shape at each point), enabling the shape ops' compat, not (just) accumulator value.
+  2. ASSEMBLE checkMatmul: compose pre (generic_step+shape dispatch) → forLoop_faithful_wfi
+     (loop) → post → store. Like verify_kernel_masked but with loop in the middle.
+  3. checkMatmul + checkMatmul_sound: checker Bool + 2D per-output-lane sweep matching the
+     integer matmul spec Σ_k a[i,k]*b[k,j]. Template: checkVectorAdd_sound (Checker.lean 792).
+  Then FLOAT layer (separate research: tf32, non-assoc +) for the actual tutorial kernel.
+RECOMMEND next session: start with body-dispatch shape-tracking design (item 1) fresh —
+it's the architecture-defining piece; everything else is scaffolding around it.
+
+═══ BODY-DISPATCH DESIGN COMPLETE — shape flow mapped (ready to write proof) ═══
+MatmulLoopInv defined (Soundness.lean, after FaithfulWFI): FaithfulWFI ∧ iter-arg shapes
+  (aptr:[M,K], bptr:[K,N], accv:[M,N]). For tutorial M=64,K=32,N=64.
+Parsed loop body (18 instrs, via parseMatmulKernel, trip param), EXACT shape flow:
+  1  muli    a:=k*c32              scalar
+  2  subi    a_50:=K-a             scalar
+  3  splat[1,32]  a_51:=a_50       [1,32]
+  4  cmpi_slt a_52:=a_ptrs_18<a_51 [1,32]  (a_ptrs_18 from pre=[1,32])
+  5  broadcast[64,32] a_53:=a_52   [64,32] SHAPE-OP: [1,32]→[64,32] (s0=1 compat)
+  6  load    a_54:=ld a_ptrs_47 a_53 cst_0  [64,32]  (a_ptrs_47 iter-arg from INV)
+  7  splat[32,1]  b:=a_50          [32,1]
+  8  cmpi_slt b_55:=b_ptrs<b       [32,1]  (b_ptrs from pre=[32,1])
+  9  broadcast[32,64] b_56:=b_55   [32,64] SHAPE-OP: [32,1]→[32,64] (s1=1 compat)
+  10 load    b_57:=ld b_ptrs_48 b_56 cst   [32,64]  (b_ptrs_48 iter-arg from INV)
+  11 dot     accumulator_58:=dot a_54 b_57 accumulator_49  [64,64] DOT (all shapes from steps+INV)
+  12 addptr  a_ptrs_59:=a_ptrs_47+cst_1     [64,32]  (preserves aptr shape)
+  13 muli    b_ptrs_60:=stride_bk*c32       scalar
+  14 splat[32,64] b_ptrs_61:=b_ptrs_60      [32,64]
+  15 addptr  b_ptrs_62:=b_ptrs_48+b_ptrs_61 [32,64]  (preserves bptr shape)
+  16 copy    a_ptrs_47:=a_ptrs_59  [64,32]  YIELD re-establishes iter-arg
+  17 copy    b_ptrs_48:=b_ptrs_62  [32,64]  YIELD
+  18 copy    accumulator_49:=accumulator_58 [64,64] YIELD
+INDUCTIVE: yield copies (16-18) re-establish the 3 iter-arg shapes from same-shaped computed
+  values → MatmulLoopInv preserved. Every op has a dispatch lemma (built this session).
+TODO next: write matmul_body_preserves (walk 18 steps, ~200 lines) proving body preserves
+  MatmulLoopInv; each shape op's compat from INV shapes / prior-step shapes. Then forLoop_matmul
+  (loop_faithful_skeleton @ MatmulLoopInv), then assemble checkMatmul, then 2D per-lane sweep.
+
+═══ BODY-WALK BLOCKED ON OP GAPS — enumerated (this is the real remaining work) ═══
+Starting matmul_body_preserves surfaced that several body/pre/post ops aren't fully built:
+DONE this stretch: MatmulLoopInv (Soundness, after FaithfulWFI), forLoop_faithful_wfi,
+  splat_step_generic_shaped (abce890 — rank-2 splat, splat_scalar_faithful was already
+  shape-parametric so just needed FaithfulWFI wrapper).
+GAP FOUND — subi has NO symbolic semantics: symEvalOp (Symbolic.lean) has arms for addi/addf/
+  cmpi_slt/cmpi_sge/muli/load/dot/expand_dims/broadcast/store/copy/etc but NO .subi. Concrete
+  evalOp .subi computes x-y via zipWith(·-·) (Semantics 299) but symbolic produces none →
+  subi currently UNFAITHFUL. Expr has no .sub ctor; encode as add ex (mul (lit -1) ey).
+  Body step 2 (subi a_50:=K-a, scalar) needs this. TO FIX: add symSub helper + .subi arm to
+  symEvalOp; then subi_scalar_faithful + subi_scalar_step_generic (clone muli_scalar path).
+LIKELY MORE GAPS (pre/post arith, from earlier #eval): divsi, remsi, minsi, andi, truncf,
+  constant_tensor/dense — each may need semantics+faithfulness+dispatch like subi.
+So body-walk = build-out each missing op's full stack THEN the 18-step walk (~200 lines) THEN
+  forLoop_matmul (loop_faithful_skeleton @ MatmulLoopInv) THEN checkMatmul + 2D sweep.
+RECOMMEND: next session, first enumerate ALL matmul ops missing semantics/faithfulness/dispatch
+  (grep symEvalOp arms vs the parsed pre/body/post op-sets), build them as a batch (subi first —
+  clean additive semantics), THEN write the walk. The walk itself is mapped (prior journal entry).
+
+═══ Expr IntBinop EXTENSION COMPLETE (1b800a7 + 9de0eab) ═══
+Added IntBinop enum {sub,divs,rems,mins,sgt} + Expr.binop node. Extended ALL Expr matchers
+across 3 files: evalExpr, Expr.beq, exprBeqEq_aux/exprBeqEq (both matrices, injectivity via
+cases o1<;>cases o2<;>first|rfl|absurd + 18 cross-cases each), exprBeqRefl (cases o<;>rfl),
+normalizeExpr, isConcrete, evalExpr_concrete (cases op<;>simp), normalizeExpr_correct (binop
+twins in every nested cases-block + outer .binop case). Full build green, sorry=4, vector-add
+still axiom-clean. KEY LESSON: the beq machinery is DUPLICATED in Symbolic.lean AND Checker.lean
+(79 sites) — the deriving DecidableEq cleanup is the right FUTURE refactor (do isolated, after
+matmul works, with vector-add+matmul as regression tests). IntBinop derives DecidableEq,BEq but
+NOT LawfulBEq (unsupported for the enum) — so beq→eq conversions use cases, not eq_of_beq.
+
+NEXT (now unblocked — the integer index arithmetic can be modeled):
+  1. symEvalOp arms for subi/divsi/remsi/minsi/cmpi_sgt: map each to binop, mirroring how
+     .addi uses symAdd (Symbolic.lean ~340). e.g. .subi => symBinop .sub (lookup a)(lookup b).
+     Write a symBinop helper (like symAdd @263). Concrete evalOp already has subi(299)/others?
+     — CHECK which concrete arms exist; add any missing (mirror subi's zipWith pattern).
+  2. faithfulness: subi_scalar_faithful etc. (scalar case is all matmul needs for index math);
+     the binop evalExpr computes x-y/x/y/etc matching concrete zipWith.
+  3. dispatch: *_scalar_step_generic for each (clone muli_scalar path).
+  4. andi (tensor mask [64,64]) + constant_tensor ([M,N] init) — tensor ops, separate small builds.
+  5. THEN the body walk (matmul_body_preserves, 18 steps mapped) → forLoop_matmul → checkMatmul.
+  truncf = FLOAT (f32→f16 before store) — integer spine verifies UP TO the store boundary.
+
+═══ INTEGER INDEX ARITHMETIC COMPLETE (subi/divsi/remsi/minsi/cmpi_sgt) ═══
+Full stack for all 5 ops, build green, sorry=4:
+- SEMANTICS: symBinop helper (clones symAdd → Expr.binop op); symEvalOp arms for subi/divsi/
+  remsi/minsi; concrete evalOp + symEvalOp .cmpi_sgt arms (cloned cmpi_slt with >).
+- FAITHFULNESS: *_scalar_faithful cores (StatesFaithful) for all 5; subi/divsi/remsi via
+  zipWith reduction, minsi/cmpi_sgt via explicit-match. All clone muli_scalar_faithful.
+- DISPATCH: *_scalar_step_generic (FaithfulWFI) for all 5, placed AFTER FaithfulWFI def
+  (they reference it — same placement lesson as forLoop_faithful_wfi). Faithfulness cores
+  stay early (StatesFaithful only, no FaithfulWFI dependency).
+LESSON: lemmas referencing FaithfulWFI must be placed after its def (line ~3041); cores using
+only StatesFaithful can be early. Scalar suffices — all matmul grid/index math is scalar.
+
+REMAINING for integer checkMatmul:
+  1. andi (tensor mask [64,64] bool AND) — needs symEvalOp arm + faithfulness + dispatch (tensor).
+  2. constant_tensor (0/[M,N] and 32/[64,32] init) — [] args → shaped const tensor; arm+faith+dispatch.
+  3. body walk matmul_body_preserves (18 steps mapped in journal) → forLoop_matmul
+     (loop_faithful_skeleton @ MatmulLoopInv) → checkMatmul (pre→loop→post→store) → 2D per-lane sweep.
+  truncf = FLOAT (f32→f16 pre-store) — integer spine verifies UP TO the store boundary.
+
+═══ ALL MATMUL INTEGER OPS COMPLETE (full stack: semantics+faithfulness+dispatch) ═══
+This stretch finished EVERY op the integer matmul needs. Build green, sorry=4, vector-add clean.
+INT ARITHMETIC (5 ops, scalar): subi/divsi/remsi/minsi/cmpi_sgt — symBinop→Expr.binop,
+  *_scalar_faithful, *_scalar_step_generic. (from earlier this session)
+TENSOR OPS (this stretch):
+  - andi: symEvalOp arm (nested Expr.select = logical AND), andi_tt_faithful (zip_and_getD +
+    select_and_eq bridge for nested-if=&&-if), andi_tt_step, andi_step_generic (tensor-tensor
+    productive via andi_tt_step, scalar-scalar productive via select_and_eq, mismatches noop).
+  - constant_tensor: symEvalOp arm (tensor shape (fun _ => lit val)), constant_tensor_faithful
+    (bind_tensor + getElem?_replicate), constant_tensor_step_generic (nullary, like splat).
+SHAPE OPS (earlier sessions): broadcast/expand_dims/dot + compat bridges + step_generics. DONE.
+So EVERY parsed matmul instruction dispatches into FaithfulWFI EXCEPT truncf (FLOAT, f32→f16
+pre-store) and the dot's float arithmetic — integer spine verifies control/data/index structure
+UP TO the float boundary.
+
+REMAINING = ASSEMBLY ONLY (no new op-building!):
+  1. matmul_body_preserves: 18-step body walk (mapped in journal) proving body preserves
+     MatmulLoopInv — uses the dispatch lemmas we just finished + MatmulLoopInv shape conjuncts
+     for broadcast/dot compat. Shape flow already mapped.
+  2. forLoop_matmul: loop_faithful_skeleton @ MatmulLoopInv (like forLoop_faithful_wfi).
+  3. checkMatmul: compose pre→forLoop_matmul→post→store (like verify_kernel_masked + loop).
+  4. checkMatmul_sound: unpack + 2D per-output-lane sweep vs Σ_k a[i,k]*b[k,j] (template
+     checkVectorAdd_sound @792). truncf/dot-float = separate float research layer.
+
+═══ BODY-WALK SHAPE-TRACKING: invariant needs extending (design finding) ═══
+Starting matmul_body_preserves: the shape ops need operand shapes at the running state.
+SHAPE FLOW confirmed from evalOp:
+  - splat[shape] → tensor shape (INSTRUCTION-determined, clean helper possible)
+  - broadcast[shape] → tensor shape (INSTRUCTION-determined target; needs operand BE rank-2 tensor)
+  - cmpi_slt → tensor (operand's shape) — needs operand tracked
+FINDING: body reads values defined OUTSIDE the body that MatmulLoopInv doesn't yet carry:
+  - a_ptrs_18 : [1,32]  (pre-loop, read by cmpi at body-step 4)
+  - b_ptrs    : [32,1]  (pre-loop, read by cmpi at body-step 8)
+  These are loop-INVARIANT (defined before loop, unchanged in body) but the body's cmpi steps
+  need their shapes. Current MatmulLoopInv only carries the 3 iter-args (a_ptrs_47/b_ptrs_48/
+  accumulator_49). MUST EXTEND MatmulLoopInv with a_ptrs_18:[1,32] and b_ptrs:[32,1] conjuncts
+  (and verify no other body-read externals are missing — audit all 18 steps' operands).
+PLAN for matmul_body_preserves:
+  1. Extend MatmulLoopInv: add conjuncts for a_ptrs_18:[1,32], b_ptrs:[32,1] (+audit for more).
+  2. Shape-tracking helpers: evalInstr_splat_shape (splat[sh]→tensor sh), evalInstr_broadcast_shape
+     (broadcast[t] on rank-2→tensor t). For instruction-determined shapes.
+  3. Walk 18 steps: dispatch each via its step_generic (all exist now); at each shape op supply
+     the operand shape from invariant conjuncts / prior-step helper results.
+  4. Re-establish MatmulLoopInv at end (yield copies re-bind iter-args to same-shaped values).
+This is THE hard assembly piece — intricate shape bookkeeping. Everything it needs (dispatch
+lemmas) is built; the work is threading shapes correctly. Next session: extend invariant first.
+
+═══ OP FOUNDATION COMPLETE — every parsed matmul instruction dispatches ═══
+FLOAT QUESTION RESOLVED: parser type-erases f16→integer ops. Parsed kernel = 105 ops, of which
+104 integer + 1 truncf, and concrete truncf = IDENTITY (match args | [v] => s.lookup v).
+So the parsed kernel is integer end-to-end and our integer stack verifies it. Caveat to document:
+we verify the parsed (type-erased) IR; f16 numerics are not modeled. Float-symbolic foundation
+(FExpr/FBinop/evalFExpr/SymValue.fscalar+ftensor) is BANKED for future type-aware parsing.
+
+Closed this stretch:
+- truncf: symEvalOp arm (identity) + truncf_step_generic (clone of copy_step_generic).
+- 12 fscalar/ftensor cases in SymValue matchers (discharge like scalar).
+- 3-ARG MASKED LOAD (the body's tile loads: load ptr,mask,fill where fill=constant_tensor 0):
+  zip_mask_load_fill_getD, load_tensor_masked_fill_faithful, load_masked_fill_step,
+  load_masked_fill_step_generic. (2-arg load_masked_* was insufficient — body loads are 3-arg.)
+
+EVERY parsed matmul op now dispatches: constant/constant_tensor/get_program_id/addi/subi/muli/
+divsi/remsi/minsi/cmpi_slt/cmpi_sge/cmpi_sgt/andi/make_range/splat[any shape]/expand_dims/
+broadcast/addptr/load(1,2,3-arg)/dot/copy/truncf/store.
+
+NEXT = THE BODY WALK (pure assembly, no new ops):
+  1. Extend MatmulLoopInv with pre-loop mask-base shapes: a_ptrs_18:[1,32], b_ptrs:[32,1]
+     (read by body cmpi steps 4 and 8). Also the loads need cst_0:[64,32], cst:[32,64] shapes
+     (3-arg load fill operands) — either add to inv or derive (they're constant_tensor, so their
+     shapes are instruction-determined and re-derivable).
+  2. matmul_body_preserves: 18-step walk (shape flow mapped in earlier journal entry), each step
+     dispatching via its *_step_generic, shape ops fed shapes from inv conjuncts + tracked results.
+  3. forLoop_matmul (loop_faithful_skeleton @ MatmulLoopInv), then checkMatmul (pre→loop→post→
+     store), then checkMatmul_sound (2D per-lane sweep vs Σ_k a[i,k]*b[k,j]).
+
+═══ BODY WALK: ALL 18 INSTRUCTIONS PROVEN (5 segments) ═══
+matmul_body_seg1: steps 1-4  (muli, subi, splat[1,K], cmpi_slt) → a_52 : [1,K]
+matmul_body_seg2: steps 5-6  (broadcast[M,K], 3-arg load)      → a_54 : [M,K]
+matmul_body_seg3: steps 7-10 (splat[K,1], cmpi, broadcast[K,N], load) → b_57 : [K,N]
+matmul_body_seg4: step 11    (dot [M,K]·[K,N]+[M,N])            → accumulator_58 : [M,N]
+matmul_body_seg5: steps 12-18 (addptr, muli, splat, addptr, 3 yield copies)
+                  → FaithfulWFI + re-establishes a_ptrs_47:[M,K], b_ptrs_48:[K,N],
+                    accumulator_49:[M,N]  ⇒ MatmulLoopInv is INDUCTIVE.
+All five build; full build green; sorry=4; vector-add still axiom-clean.
+
+TOOLKIT built for the walk (all proven):
+- evalInstr_eq_bind : non-store op with evalOp=some val ⇒ evalInstr = s.bind result val
+- env_carry         : non-store instr preserves every var except its own result
+- env_carry_kernel  : a whole straight-line block preserves any var it never writes
+                      (ONE application per var per segment — the key to cheap composition)
+- binds family: muli/subi_scalar/splat_shaped/cmpi_slt_tt/broadcast(+_len)/load_fill/dot/
+  copy/addptr_tt — each gives the RESULT VALUE+SHAPE of one step.
+WALK IDIOM (proven, repeatable):
+  faithful: <op>_step_generic Ik <args> rfl rfl <prev_faithful>
+  shape   : <op>_binds <prev_state> <result> <args> ... <operand_facts>
+  thread  : (env_carry Ik <state> "v" (by simp [Ik]) (by simp [Ik]) (by simp [Ik])).trans <prev>
+  NOTE: `set` breaks this; use explicit nested evalInstr terms. Segments must be placed
+  AFTER all *_step_generic defs (forward refs otherwise).
+
+NEXT — COMPOSE (bounded, mechanical):
+ 1. Restate seg1..seg5 so each CARRIES FORWARD the facts later segments need
+    (seg2 wants a_ptrs_47/cst_0; seg3 wants a_50/b_ptrs/b_ptrs_48/cst; seg4 wants
+    a_54/b_57/accumulator_49; seg5 wants a_ptrs_47/cst_1/b_ptrs_48/stride_bk/c32_i32/
+    accumulator_58). Use env_carry_kernel per (var, segment) — one line each.
+ 2. Chain seg1→…→seg5 into matmul_body_preserves :
+      MatmulLoopInv aptr bptr accv amask bmask afill bfill M K N c sc mem →
+      MatmulLoopInv … (evalKernel body c) (symEvalKernel body sc) mem
+    (the 4 pre-loop tensors survive via env_carry_kernel; iter-args restored by seg5)
+ 3. forLoop_matmul  := loop_faithful_skeleton @ MatmulLoopInv (cf. forLoop_faithful_wfi)
+ 4. checkMatmul     := pre → forLoop_matmul → post → store (cf. verify_kernel_masked)
+ 5. checkMatmul_sound := unpack + 2D per-output-lane sweep vs Σ_k a[i,k]*b[k,j]
+    (template: checkVectorAdd_sound). truncf is concrete-identity, so the store sees
+    the accumulator unchanged.
+
+COMPOSITION — mechanics confirmed:
+- evalKernel = foldl; evalKernel_append (1939) + symEvalKernel_append (1943) exist.
+- evalKernel [i1..i4] s = evalInstr i4 (… i1 s) by `simp [evalKernel]` (evalKernel_four bridge).
+- Plan: state body = seg1_instrs ++ … ++ seg5_instrs; split with evalKernel_append;
+  apply each segment at its state; supply each segment's operand hypotheses by
+  env_carry_kernel over the PRECEDING instruction lists (side conditions: ∀ i ∈ list,
+  w ≠ i.result — dischargeable by decide/simp on the concrete lists).
+- Carries needed: seg2 ← a_ptrs_47, cst_0. seg3 ← a_50, b_ptrs, b_ptrs_48, cst.
+  seg4 ← a_54, b_57, accumulator_49. seg5 ← a_ptrs_47, cst_1, b_ptrs_48, stride_bk,
+  c32_i32, accumulator_58. (~16 env_carry_kernel applications total.)
+- Then: forLoop_matmul → checkMatmul → checkMatmul_sound (2D sweep).
+
+═══ BODY COMPOSITION COMPLETE + INDUCTIVE STEP CORE ═══
+DONE (all building, sorry=4, vector-add axiom-clean):
+- matmul_body_seg12 / seg123 / seg1234 / matmul_body_all : the five segments composed into
+  the FULL 18-instruction body. Carries via env_carry_kernel (+ evalKernel_append when the
+  carried var is produced mid-block, e.g. a_50, a_54).
+- MatmulLoopInv extended with astep (cst_1) conjunct  ⇒ now 9 conjuncts:
+  FaithfulWFI + aptr[M,K] + bptr[K,N] + accv[M,N] + amask[1,K] + bmask[K,1]
+  + afill[M,K] + bfill[K,N] + astep[M,K]
+- shapeProd_pair simp lemma (shapeProd [x,y] = x*y)
+- matmul_body_preserves : unpacks the invariant, DERIVES the six length facts from WFState,
+  applies matmul_body_all, bridges nested-evalInstr → evalKernel form.
+  Concludes FaithfulWFI (evalKernel body c) + the three iter-arg shapes restored.
+- faithfulWFI_bind_scalar : binding the induction variable preserves FaithfulWFI
+  (bind_scalar_faithful + WFState_bind_scalar + NoFloatState_bind_scalar; note the
+  `evalExpr (lit n) mem = n` side goal needs `by simp [evalExpr]`, not `rfl`).
+
+NEXT (mechanical, ~100 lines):
+ 1. matmul_body_step : at c' = c.bind "k" (scalar k),
+      - FaithfulWFI c' sc'            ← faithfulWFI_bind_scalar
+      - the 9 invariant conjuncts at c' ← each name ≠ "k", so `simp [MachineState.bind]`
+      - scalars k / c32_i32 / K / stride_bk at c'  ← same
+      then apply matmul_body_preserves, and rebuild the FULL invariant at body end:
+      FaithfulWFI ✓ + 3 iter-args ✓ (from the lemma) + 6 pre-loop tensors via
+      env_carry_kernel over the 18-instr body (none of a_ptrs_18/b_ptrs/cst_0/cst/cst_1
+      is ever a result in the body — checked).
+ 2. forLoop_matmul := loop_faithful_skeleton with R := MatmulLoopInv … (cf. forLoop_faithful_wfi)
+ 3. checkMatmul  := pre → forLoop_matmul → post → store (cf. verify_kernel_masked)
+ 4. checkMatmul_sound := unpack + 2D per-output-lane sweep vs Σ_k a[i,k]*b[k,j]
+    (template checkVectorAdd_sound; truncf is concrete-identity so the store sees the
+     accumulator unchanged).
+GOTCHAS: place new lemmas AFTER the defs they reference (FaithfulWFI ~3041, the
+*_step_generic block, matmul_body_* at file end). `set` breaks the walk idiom — use explicit
+nested evalInstr. No Mathlib: no fin_cases/norm_num; use
+`simp only [List.mem_cons, List.not_mem_nil, or_false] at hi; rcases hi with h|h|… <;> subst h <;> simp [...]`.
+
+═══ BODY COMPOSITION COMPLETE + INDUCTIVE STEP CORE ═══
+DONE (all building, sorry=4, vector-add axiom-clean):
+- matmul_body_seg12 / seg123 / seg1234 / matmul_body_all : the five segments composed into
+  the FULL 18-instruction body. Carries via env_carry_kernel (+ evalKernel_append when the
+  carried var is produced mid-block, e.g. a_50, a_54).
+- MatmulLoopInv extended with astep (cst_1) conjunct  ⇒ now 9 conjuncts:
+  FaithfulWFI + aptr[M,K] + bptr[K,N] + accv[M,N] + amask[1,K] + bmask[K,1]
+  + afill[M,K] + bfill[K,N] + astep[M,K]
+- shapeProd_pair simp lemma (shapeProd [x,y] = x*y)
+- matmul_body_preserves : unpacks the invariant, DERIVES the six length facts from WFState,
+  applies matmul_body_all, bridges nested-evalInstr → evalKernel form.
+  Concludes FaithfulWFI (evalKernel body c) + the three iter-arg shapes restored.
+- faithfulWFI_bind_scalar : binding the induction variable preserves FaithfulWFI
+  (bind_scalar_faithful + WFState_bind_scalar + NoFloatState_bind_scalar; note the
+  `evalExpr (lit n) mem = n` side goal needs `by simp [evalExpr]`, not `rfl`).
+
+NEXT (mechanical, ~100 lines):
+ 1. matmul_body_step : at c' = c.bind "k" (scalar k),
+      - FaithfulWFI c' sc'            ← faithfulWFI_bind_scalar
+      - the 9 invariant conjuncts at c' ← each name ≠ "k", so `simp [MachineState.bind]`
+      - scalars k / c32_i32 / K / stride_bk at c'  ← same
+      then apply matmul_body_preserves, and rebuild the FULL invariant at body end:
+      FaithfulWFI ✓ + 3 iter-args ✓ (from the lemma) + 6 pre-loop tensors via
+      env_carry_kernel over the 18-instr body (none of a_ptrs_18/b_ptrs/cst_0/cst/cst_1
+      is ever a result in the body — checked).
+ 2. forLoop_matmul := loop_faithful_skeleton with R := MatmulLoopInv … (cf. forLoop_faithful_wfi)
+ 3. checkMatmul  := pre → forLoop_matmul → post → store (cf. verify_kernel_masked)
+ 4. checkMatmul_sound := unpack + 2D per-output-lane sweep vs Σ_k a[i,k]*b[k,j]
+    (template checkVectorAdd_sound; truncf is concrete-identity so the store sees the
+     accumulator unchanged).
+GOTCHAS: place new lemmas AFTER the defs they reference (FaithfulWFI ~3041, the
+*_step_generic block, matmul_body_* at file end). `set` breaks the walk idiom — use explicit
+nested evalInstr. No Mathlib: no fin_cases/norm_num; use
+`simp only [List.mem_cons, List.not_mem_nil, or_false] at hi; rcases hi with h|h|… <;> subst h <;> simp [...]`.
+
+═══ VALUE-DOMAIN LAYER: frame established, address invariant is the crux ═══
+PROVEN this stretch:
+- dot_lane_value : evalOp .dot's lane (i,j) = contract A B k1 n i j + Acc[i*n+j]
+  ⇒ the dot's index arithmetic IS the standard row-major contraction. No off-by-one.
+  (helpers: range_map_getD_gen, lane_div, lane_mod, lane_lt)
+- layoutMatmul A B M K N (row-major: A at [0,M*K), B next, C after) + addrA/addrB/addrC
+  + layoutMatmul_A / layoutMatmul_B (read-back lemmas)
+- AccPartial A B Kfull N i j t Kd (partial contraction over first t tiles)
+- AccPartial_full : T*Kd = Kfull ⇒ AccPartial … T = contract A B Kfull N i j
+
+THE REMAINING CRUX — the ADDRESS INVARIANT:
+  The value invariant we want is
+     accumulator_49[i*N+j] = AccPartial A B Kfull N i j t Kd   (after t iterations)
+  Its inductive step needs dot_lane_value PLUS the fact that the loaded tiles are the
+  right slices:
+     contract a_tile b_tile Kd Nd i j
+       = Σ_{kk<Kd} A[i*Kfull + (t*Kd+kk)] * B[(t*Kd+kk)*N + j]
+  which requires an ADDRESS invariant carried alongside the shape invariant:
+     a_ptrs_47[i*Kd + kk] = addrA Kfull i (t*Kd + kk)
+     b_ptrs_48[kk*Nd + j] = addrB M Kfull N (t*Kd + kk) j
+  - established at loop entry by the pre-block's pointer construction
+    (expand_dims/broadcast/muli/addptr chain on offs_am / offs_k / strides)
+  - stepped by the body's two addptrs: a_ptrs += cst_1 (=Kd), b_ptrs += splat(stride_bk*Kd)
+  - masking: the k-bound masks (a_52/b_55) zero lanes where t*Kd+kk ≥ Kfull, matching the
+    3-arg load's zero fill; so out-of-range tiles contribute 0 to the contraction.
+  NOTE: load_tensor_masked_fill_faithful only says the load reads readMem at whatever
+  addresses the pointer tensor holds — it says nothing about WHICH addresses. The address
+  invariant is exactly that missing link, and it is the deepest remaining piece.
+PLAN: (1) state MatmulAddrInv (the two pointer-content equations, parameterized by t);
+      (2) prove the body steps it t → t+1 (addptr_tt_binds gives the arithmetic);
+      (3) prove the masked load turns it into the tile-slice equation (needs mask semantics
+          + the zero fill);  (4) combine with dot_lane_value into the value invariant;
+      (5) loop it (loop_faithful_skeleton with R := shape ∧ addr ∧ value);
+      (6) then post/store gives checkMatmul_sound at each output lane.
+
+═══ VALUE LAYER: EVERY SEMANTIC INGREDIENT PROVEN ═══
+The matmul theorem's content is now established in Lean. No mathematical uncertainty remains;
+what's left is assembly through the body walk we already built for shapes.
+
+PROVEN (all building, sorry=4):
+  dot_lane_value      dot_out[i*n+j] = contract A B k1 n i j + Acc[i*n+j]
+                      ⇒ evalOp .dot IS the row-major contraction (no off-by-one)
+  layoutMatmul + addrA/addrB/addrC + layoutMatmul_A/_B
+                      ⇒ A at [0,M*K), B next, C after; reads return the right entries
+  AptrTile / BptrTile + AptrTile_step (+Kd) / BptrTile_step (+N*Kd)
+                      ⇒ the body's addptrs advance exactly one k-tile
+                        (cst_1 = 32 = Kd; splat(stride_bk*32) = N*Kd)
+  tile_load_value_A / _B
+                      ⇒ masked load turns tile-t ADDRESSES into tile-t DATA:
+                        tile[i*Kd+kk] = if t*Kd+kk < Kfull then A[i*Kfull+t*Kd+kk] else 0
+  masked_term_eq (+ getD_oob)
+                      ⇒ out-of-range columns: kernel masks to 0, spec's getD reads past
+                        B's end (len Kfull*N) giving 0. THEY AGREE. Needs B.length = Kfull*N.
+  AccPartial / AccPartial_succ / AccPartial_full / foldl_range_add
+                      ⇒ tiles accumulate; after T tiles (T*Kd = Kfull) it IS `contract`
+
+GOTCHAS learned: omega can't see inside Int.ofNat (prove the Nat identity, then lift; the
+cast splits by rfl). omega also can't do variable products (i*Kfull) — use structural Nat
+lemmas. `List.getD_eq_default` doesn't exist; use getD_oob (via List.getElem?_eq_none).
+
+REMAINING = ASSEMBLY (no new math):
+ 1. MatmulLoopInv += address conjuncts (a_ptrs_47 lane (i,kk) = AptrTile Kfull Kd t i kk;
+    b_ptrs_48 lane (kk,j) = BptrTile M Kfull N Kd t kk j) and the value conjunct
+    (accumulator_49[i*N+j] = AccPartial A B Kfull N i j t Kd). Parameterize by t.
+ 2. Re-walk the body carrying them. New work only at: the two loads (tile_load_value_*),
+    the dot (dot_lane_value + masked_term_eq + AccPartial_succ), the two addptrs
+    (AptrTile_step / BptrTile_step via addptr_tt_binds). Everything else carries by env_carry.
+ 3. Loop entry (t=0): pre-block establishes AptrTile/BptrTile at t=0 and acc = 0 = AccPartial 0.
+    Loop exit (t=T): AccPartial_full ⇒ accumulator = contract.
+ 4. Post + store ⇒ checkMatmul_sound at each output lane (truncf is concrete-identity).
+
+═══ VALUE LAYER: statement + every ingredient proven; mask boundary pinned down ═══
+NEW this stretch (all building, sorry=4):
+  loop_indexed_skeleton   R : Nat → C → S → Prop, R k → R (k+1), concludes R trip.
+                          (loop_faithful_skeleton's FIXED relation cannot express the
+                           value invariant — this was a structural prerequisite.)
+  MatmulValueInv A B M Kfull N Md Kd Nd t c   -- THE STATEMENT:
+      a_ptrs_47 lane (i,kk) = AptrTile Kfull Kd t i kk
+      b_ptrs_48 lane (kk,j) = BptrTile M Kfull N Kd t kk j
+      accumulator_49 lane (i,j) = AccPartial A B Kfull N i j t Kd
+    (kept SEPARATE from MatmulLoopInv so the shape walk stays untouched; they compose)
+  AccPartial_zero / AptrTile_zero / BptrTile_zero      (loop entry, t=0)
+  splat_lane / broadcast_row_lane / broadcast_col_lane (per-lane reads of the mask chain)
+  mask_boundary : (kk < K - t*Kd  over Int) ↔ (t*Kd + kk < Kfull)
+  mask_lane_value : the kernel's mask value = the spec's, in tile_load_value_* form
+    ⇒ THE TAIL TILE IS CORRECT because arith.subi is SIGNED. Over Nat the subtraction
+      truncates to 0 and the mask would admit every lane. Now machine-checked.
+
+REMAINING = ONE SECOND BODY PASS (pure assembly; every lemma needed is proven and in-file):
+ 1. matmul_value_step : MatmulValueInv … t → MatmulValueInv … (t+1) across MatmulBody.
+    Carry per-lane VALUE facts (not shapes) through the 18 instructions. Plug in:
+      a_51 (splat_lane) → a_52 (cmpi lane + mask_lane_value) → a_53 (broadcast_row_lane)
+      b    (splat_lane) → b_55 (cmpi lane + mask_lane_value) → b_56 (broadcast_col_lane)
+      a_54 / b_57  : tile_load_value_A / tile_load_value_B
+      accumulator_58 : dot_lane_value + masked_term_eq + AccPartial_succ
+      a_ptrs_59 / b_ptrs_62 : addptr_tt_binds + AptrTile_step / BptrTile_step
+      the three yield copies re-bind (copy_binds), as in the shape walk
+    Still needed: a cmpi-lane lemma (lane value of cmpi_slt on two tensors) — small.
+ 2. forLoop_matmul_value := loop_indexed_skeleton @ (MatmulLoopInv ∧ MatmulValueInv t)
+ 3. Loop entry: pre-block ⇒ MatmulValueInv … 0 (AptrTile_zero/BptrTile_zero/AccPartial_zero;
+    accumulator starts as constant_tensor 0). Loop exit: AccPartial_full (T*Kd = Kfull)
+    ⇒ accumulator = contract A B Kfull N i j.
+ 4. Post + store ⇒ checkMatmul_sound per output lane. truncf is concrete-identity, so the
+    store sees the accumulator unchanged. Needs B.length = Kfull*N (masked_term_eq's hyp).
+
+═══ VALUE LAYER: EVERY LINK IN THE CHAIN IS PROVEN ═══
+The path from "the kernel runs" to "the output is Σ_k A[i,k]·B[k,j]" is now a chain of
+proven lemmas. Nothing mathematical remains; only threading them through the body walk.
+
+THE CHAIN (all building, sorry=4):
+  offs_k lane = kk                                      (hypothesis, established at entry)
+  → amask_cmpi_lane / bmask_cmpi_lane                   masks = (t*Kd+kk < Kfull)
+      built from: cmpi_lane, splat_lane, mask_lane_value
+      mask_lane_value rests on mask_boundary: the kernel's Int comparison
+      (kk < K - t*Kd) IS (t*Kd+kk < Kfull) — tail tile correct because subi is SIGNED
+  → broadcast_row_lane (A: [1,Kd]→[Md,Kd]) / broadcast_col_lane (B: [Kd,1]→[Kd,Nd])
+  → tile_load_value_A / tile_load_value_B               tiles hold the right slices
+      (rests on layoutMatmul_A/_B and zip_mask_load_fill_getD)
+  → tile_contraction_eq                                 contracting tiles = spec's tile term
+      (rests on masked_term_eq: out-of-range killed by B.length = Kfull*N, via getD_oob)
+  → dot_lane_value                                      dot adds it to the accumulator
+  → AccPartial_succ                                     …which is exactly AccPartial (t+1)
+  → AptrTile_step / BptrTile_step                       pointers advance to tile t+1
+  → loop_indexed_skeleton                               threads t → t+1 through the loop
+  → AccPartial_full (T*Kd = Kfull)                      at t=T the accumulator IS `contract`
+
+MINIMAL PRECONDITION (discovered, not assumed): only B.length = Kfull*N is needed.
+A's length is unconstrained — B's bound alone zeroes the out-of-range columns.
+(masked_term_eq's hA hypothesis was dropped as unused.)
+
+REMAINING = matmul_value_step, i.e. THE SECOND BODY WALK (mechanical):
+ thread the above through MatmulBody's 18 instructions with env_carry, exactly as the shape
+ walk did. Per-lane VALUE facts instead of shapes. New work only at the two mask chains,
+ the two loads, the dot, and the two addptrs — every one has its lemma ready.
+ Then: loop entry (t=0: AptrTile_zero/BptrTile_zero/AccPartial_zero; accumulator starts as
+ constant_tensor 0), loop exit (AccPartial_full), post + store ⇒ checkMatmul_sound.
+ NOTE the value invariant also needs, at entry, the loop-invariant facts:
+   a_ptrs_18 lane kk = Int.ofNat kk   (offs_k, from make_range 32 + expand_dims)
+   b_ptrs    lane kk = Int.ofNat kk
+   cst_1 = all-Kd tensor;  splat(stride_bk * 32) = all-(N*Kd) tensor (needs stride_bk = N)
+ZSH GOTCHA: no backticks inside git commit -m under zsh (command substitution).
+
+═══ VALUE WALK: PER-INSTRUCTION LAYER COMPLETE ═══
+Every instruction in MatmulBody now has a value-domain lemma (all building, sorry=4):
+  value_seg_A     I1..I6   a_54 lane (i,kk) = if t*Kd+kk < Kfull then A[i*Kfull+t*Kd+kk] else 0
+  value_seg_B     I7..I10  b_57 lane (kk,j) = if t*Kd+kk < Kfull then B[(t*Kd+kk)*N+j] else 0
+                           (needs Kd != 1: broadcast_col_lane's side condition)
+  value_seg_C_dot I11      accumulator_58 lane (i,j) = AccPartial A B Kfull N i j (t+1) Kd
+  value_seg_C_aptr J1      a_ptrs_59 lane (i,kk) = AptrTile Kfull Kd (t+1) i kk
+  value_seg_C_bptr J2..J4  b_ptrs_62 lane (kk,j) = BptrTile M Kfull N Kd (t+1) kk j
+                           (this is where stride_bk = N is actually used)
+  J5..J7 (yields)          copy_binds
+
+SUPPORT built along the way:
+  load_fill_binds_explicit / dot_binds_explicit  (surface the output expressions; the
+    plain *_binds hide them behind existentials, which blocks the lane lemmas)
+  memory_carry_kernel       (no-store blocks preserve memory; needed to rewrite readMem
+    into layoutMatmul at each load)
+  MatmulConsts A B M Kfull N Md Kd Nd c  -- the loop-invariant facts:
+    c.memory = layoutMatmul A B M Kfull N
+    a_ptrs_18 / b_ptrs lanes = Int.ofNat kk;  cst_1 all-Kd;  cst_0 / cst zero fills (+lengths)
+    c32_i32 = Kd;  stride_bk = N   (the row-major-B assumption, stated explicitly)
+
+COERCION LESSON (bit us three times): Int.ofNat splits definitionally over + and *, so
+  Int.ofNat (a+b) = Int.ofNat a + Int.ofNat b   is rfl, NOT a rewrite target.
+  omega cannot see inside Int.ofNat. Pattern: prove the Nat identity, then `rfl` or `show`.
+  Same trap with Option: ((some x).map f).getD d = f x is rfl but not syntactically matched,
+  so `rw` fails. Fixed by restating dot_lane_value without the wrapper.
+
+NEXT — matmul_value_step (composition):
+ Thread the five segments through MatmulBody with env_carry_kernel, as the shape walk did.
+ WRINKLE: unlike shapes, the carried facts are ∀-quantified LANE equalities. Carrying them
+ across a block means (a) carrying the tensor equality via env_carry_kernel, then
+ (b) re-applying the lane fact to the carried tensor. The tensor is literally the same list,
+ so this is bookkeeping, not new math -- but it's more delicate than carrying a shape.
+ Specifically: value_seg_C_dot needs a_54's lane facts at the post-I10 state (survive I7..I10)
+ and accumulator_49's lane facts at post-I10 (untouched by I1..I10).
+ Then: yields re-establish MatmulValueInv at t+1; loop_indexed_skeleton lifts to the loop;
+ loop entry (t=0) from the pre-block; exit via AccPartial_full.
+ STILL OPEN (flagged earlier, must fix before loop entry):
+   - AptrTile ignores the pid_m offset and the % M wrap in offs_am. Correct only for pid_m=0.
+   - AccPartial_full assumes T*Kd = Kfull; the kernel's trip count gives T*Kd >= Kfull.
+     Generalize to the inequality (extra columns are masked; B.getD reads past the end -> 0).

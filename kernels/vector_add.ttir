@@ -1,0 +1,23 @@
+module {
+  tt.func public @add_kernel(
+      %arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32},
+      %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32},
+      %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32},
+      %arg3: i32 {tt.divisibility = 16 : i32})
+      attributes {noinline = false} {
+    %c1024_i32 = arith.constant 1024 : i32
+    %0 = tt.get_program_id x : i32
+    %1 = arith.muli %0, %c1024_i32 : i32
+    %2 = tt.make_range {end = 1024 : i32, start = 0 : i32} : tensor<1024xi32>
+    %3 = tt.splat %1 : i32 -> tensor<1024xi32>
+    %4 = arith.addi %3, %2 : tensor<1024xi32>
+    %5 = tt.addptr %arg0, %4 : !tt.ptr<f32>, tensor<1024xi32>
+    %6 = tt.addptr %arg1, %4 : !tt.ptr<f32>, tensor<1024xi32>
+    %7 = tt.addptr %arg2, %4 : !tt.ptr<f32>, tensor<1024xi32>
+    %8 = tt.load %5 : tensor<1024x!tt.ptr<f32>>
+    %9 = tt.load %6 : tensor<1024x!tt.ptr<f32>>
+    %10 = arith.addf %8, %9 : tensor<1024xf32>
+    tt.store %7, %10 : tensor<1024x!tt.ptr<f32>>
+    tt.return
+  }
+}
